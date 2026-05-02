@@ -1,0 +1,117 @@
+[
+  {
+    "number": 1247,
+    "title": "Tasks with cross-timezone due dates display wrong day in calendar view",
+    "body": "## Summary\nWhen a user in Berlin (UTC+2) creates a task due at 11pm local, a viewer in San Francisco (UTC-7) sees it on the previous day in the calendar view, even though the underlying timestamp is correct.\n\n## Reproduction\n1. Set timezone to Europe/Berlin in user settings\n2. Create task with due date 2026-04-22 23:00\n3. Switch timezone to America/Los_Angeles\n4. Open calendar view → task appears on 2026-04-21\n\n## Expected\nTask should appear on the day matching the *creator's intended date*, not the viewer's local conversion. Per product spec, due dates are 'day-anchored' not 'instant-anchored'.\n\n## Notes\nThis bites enterprise customers with global teams. Acme Corp flagged it during last week's check-in.",
+    "labels": ["bug", "frontend", "timezones", "P2"],
+    "state": "open",
+    "created_at": "2026-04-25T14:12:00Z",
+    "comments": [
+      {
+        "user": "priya.sharma",
+        "created_at": "2026-04-25T16:30:00Z",
+        "body": "Looked at this. The issue is in `formatDueDate.ts` — we store due dates as ISO instants but the calendar grid bucketizes by viewer-local day. Need to introduce a `dueDateMode` field per workspace: 'instant' or 'day-anchored', defaulting to 'day-anchored' for new workspaces."
+      },
+      {
+        "user": "nora.lindqvist",
+        "created_at": "2026-04-26T09:45:00Z",
+        "body": "Agree on day-anchored as default. From a UX perspective most users think of 'due Friday' not 'due 11:59pm Friday in some timezone'. We'll need migration messaging for existing customers since this is a behavior change — I can draft an in-product banner."
+      },
+      {
+        "user": "sam.rivera",
+        "created_at": "2026-04-28T11:20:00Z",
+        "body": "Tagging Jordan — this might be worth a small RFC since it affects the public API contract on `/api/tasks` (we'd be adding a new field to responses)."
+      }
+    ]
+  },
+  {
+    "number": 1251,
+    "title": "Slack integration: send task notifications to channels and DMs",
+    "body": "## Customer ask\nMultiple customers (most recent: Acme Corp, Northwind, Helios) have asked for Slack notifications when:\n- A task is assigned to them\n- A task they own changes status\n- A task they're watching is commented on\n\n## Scope (v1)\n- OAuth Slack app, per-workspace install\n- Per-user notification preferences (channel, DM, off)\n- Map Loopline users to Slack users via email\n- Notification templates: assigned, status_changed, commented, mentioned\n\n## Out of scope (v1)\n- Slack → Loopline (creating tasks from Slack)\n- Custom notification templates per workspace\n- Multi-Slack-workspace mapped to single Loopline workspace\n\n## Open questions\n- Throttling: Acme has projects with 200+ daily updates. Bundle? Rate-limit per recipient?\n- How do we handle users who installed the app but haven't mapped their Slack identity?",
+    "labels": ["feature", "integrations", "P1"],
+    "state": "open",
+    "created_at": "2026-04-02T10:00:00Z",
+    "comments": [
+      {
+        "user": "ben.foster",
+        "created_at": "2026-04-02T13:15:00Z",
+        "body": "From sales: this is the #1 ask in deals over $1K MRR. Helios specifically said it's a blocker for their renewal. Cannot stress this enough."
+      },
+      {
+        "user": "jordan.patel",
+        "created_at": "2026-04-08T16:00:00Z",
+        "body": "Scoped this with Sam and Lisa. Targeting v1 in May. Will use the Slack Bolt SDK. We'll throttle to a max of 1 notification per task per user per 5 min — Acme's volume would be unusable otherwise."
+      },
+      {
+        "user": "lisa.okonkwo",
+        "created_at": "2026-04-15T09:30:00Z",
+        "body": "Started scoping the implementation. Will use the same single-transaction batched-insert pattern from PR #863 — learned the hard way from the 4/14 incident not to do per-recipient connections in fanout paths."
+      }
+    ]
+  },
+  {
+    "number": 1198,
+    "title": "Migrate API from Express 4 to Fastify",
+    "body": "## Why\n- Express 4 is in maintenance-only mode; Express 5 has been stuck in beta for years\n- Fastify is ~2x faster on our workload (benched p95 on /api/tasks)\n- Better TypeScript ergonomics (built-in schema validation)\n- Native async/await throughout — we have ~30 places where Express middleware quirks bite us\n\n## Why not\n- ~3 weeks of engineering time\n- Risk: 100+ existing routes to port\n- We have working software\n\n## Plan (when we do it)\nIncremental: stand up Fastify alongside Express, route by route via reverse proxy. Migrate hottest routes first. Decommission Express when migration is complete.",
+    "labels": ["tech-debt", "backend", "P3"],
+    "state": "open",
+    "created_at": "2026-01-18T08:00:00Z",
+    "comments": [
+      {
+        "user": "sam.rivera",
+        "created_at": "2026-01-18T11:30:00Z",
+        "body": "I want to do this but it's hard to justify against feature work. Re-evaluating each quarter. Q2 plan does not include this; Q3 might."
+      },
+      {
+        "user": "jordan.patel",
+        "created_at": "2026-03-10T14:00:00Z",
+        "body": "Discussed in eng leads sync. Deferring to Q3 at earliest. Not blocking anything currently. Will revisit at Q3 planning; closing if no movement by then."
+      }
+    ]
+  },
+  {
+    "number": 1232,
+    "title": "Connection pool exhaustion under high notification fanout load",
+    "body": "## Incident\n2026-04-14, 14:23–14:35 UTC. ~12 minutes of api-prod 503s. Triggered by deploy of PR #847 (in-app task notifications fanout).\n\n## Root cause\n`fanoutNotifications` opened a DB connection per recipient inside `Promise.all`. The error path did not call `connection.release()`. With 500+ recipients on the Acme workspace, every Promise.all rejection leaked connections until the pool (max 100) was empty.\n\n## Fix\nPR #863: refactored fanout to use a single transaction with batched inserts. Removed per-recipient connection acquisition. Added `try/finally` for any connection acquired outside transaction context.\n\n## Postmortem\nhttps://loopline.notion.site/postmortem-2026-04-14",
+    "labels": ["bug", "backend", "incident", "P1"],
+    "state": "closed",
+    "created_at": "2026-04-14T14:30:00Z",
+    "comments": [
+      {
+        "user": "tom.walsh",
+        "created_at": "2026-04-14T14:35:00Z",
+        "body": "Detected via Datadog p95 latency monitor. Mitigated by rolling back to v4.12.3. Total downtime ~12 min. Customer impact: Acme Corp during their NA launch event; two smaller customers also affected per support tickets."
+      },
+      {
+        "user": "priya.sharma",
+        "created_at": "2026-04-14T22:10:00Z",
+        "body": "PR #863 up with the fix. Added an integration test that simulates a 1000-recipient fanout to verify the pool stays healthy. Also added a `RDS connection usage > 80%` Datadog monitor as a preventive measure."
+      },
+      {
+        "user": "jordan.patel",
+        "created_at": "2026-04-17T17:00:00Z",
+        "body": "Postmortem complete and reviewed in eng all-hands. All three action items (Datadog alert, lint rule, postmortem doc) are done. Closing."
+      }
+    ]
+  },
+  {
+    "number": 1255,
+    "title": "Drag-and-drop reordering for nested subtasks (>2 levels deep)",
+    "body": "## Problem\nCurrent drag-and-drop only works at the top-level task list. Users with nested subtasks (we support up to 4 levels) have to manually edit task order in the side panel.\n\n## User feedback\n- 14 support tickets in March mentioning this\n- Acme uses 4-level nesting heavily for their project breakdowns\n- Helios opened this as a blocker for adoption with their 50-person eng team\n\n## Design\nNora has mocks: see linked Figma. Key UX decisions:\n1. Drag handle visible on hover only (avoid clutter)\n2. Drop zones distinguish (a) reorder among siblings vs (b) reparent to a new parent — visually distinct\n3. Constraint: cannot reparent a node into its own descendant (loop prevention) — show invalid drop visually\n\n## Technical notes\nWe use a materialized-path approach (`path` column, e.g. `1/4/12/3`). Reordering siblings is cheap; reparenting requires updating descendants' paths in a transactional update that can be slow on tasks with many children. Need to benchmark against prod-sized data.",
+    "labels": ["feature", "frontend", "P2"],
+    "state": "open",
+    "created_at": "2026-04-29T11:00:00Z",
+    "comments": [
+      {
+        "user": "nora.lindqvist",
+        "created_at": "2026-04-29T13:20:00Z",
+        "body": "Figma here: figma.com/loopline/dnd-subtasks. Also did a usability test with 5 users on the prototype — 4/5 figured out reparenting without prompting. The 5th was confused by the drop-zone color, so I'm changing it from blue to green for reparent vs. reorder to disambiguate."
+      },
+      {
+        "user": "lisa.okonkwo",
+        "created_at": "2026-04-30T10:00:00Z",
+        "body": "Bench result: reparenting a node with 5K descendants takes ~1.2s on prod-sized DB. We should debounce the API call and show optimistic UI client-side. Will write up the approach in a design doc before starting implementation."
+      }
+    ]
+  }
+]

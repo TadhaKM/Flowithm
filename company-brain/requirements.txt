@@ -1,0 +1,8 @@
+anthropic
+voyageai
+supabase
+fastapi
+uvicorn
+pypdf2
+python-dotenv
+tiktoken

@@ -1,0 +1,257 @@
+[
+  {
+    "channel": "engineering-incidents",
+    "user": "datadog-bot",
+    "ts": "1776262980.000100",
+    "text": "[P1 ALERT] api-prod p95 latency > 5000ms for 3 minutes. Region: us-east-1. Monitor: api-latency-p95. Runbook: notion.site/loopline/oncall"
+  },
+  {
+    "channel": "engineering-incidents",
+    "user": "tom.walsh",
+    "ts": "1776263100.000200",
+    "thread_ts": "1776262980.000100",
+    "text": "On it. Got the page. Looking at Datadog now."
+  },
+  {
+    "channel": "engineering-incidents",
+    "user": "tom.walsh",
+    "ts": "1776263220.000300",
+    "thread_ts": "1776262980.000100",
+    "text": "p95 climbing to 8s, lots of 503s on /api/tasks endpoints. error rate ~12%. this is bad."
+  },
+  {
+    "channel": "engineering-incidents",
+    "user": "jordan.patel",
+    "ts": "1776263280.000400",
+    "thread_ts": "1776262980.000100",
+    "text": "I'm in. Joining the war room. Anyone declared an incident yet?"
+  },
+  {
+    "channel": "engineering-incidents",
+    "user": "tom.walsh",
+    "ts": "1776263320.000500",
+    "thread_ts": "1776262980.000100",
+    "text": "declaring SEV-2 now. logs full of \"FATAL: remaining connection slots are reserved for non-replication superuser connections\""
+  },
+  {
+    "channel": "engineering-incidents",
+    "user": "jordan.patel",
+    "ts": "1776263360.000600",
+    "thread_ts": "1776262980.000100",
+    "text": "RDS connection pool exhaustion. what shipped today?"
+  },
+  {
+    "channel": "engineering-incidents",
+    "user": "sam.rivera",
+    "ts": "1776263400.000700",
+    "thread_ts": "1776262980.000100",
+    "text": "PR #847 merged at 13:50 UTC. in-app task notifications fanout. Priya's change."
+  },
+  {
+    "channel": "engineering-incidents",
+    "user": "sam.rivera",
+    "ts": "1776263460.000800",
+    "thread_ts": "1776262980.000100",
+    "text": "rolling back to v4.12.3 now via deploy script. ETA ~4 min."
+  },
+  {
+    "channel": "engineering-incidents",
+    "user": "tom.walsh",
+    "ts": "1776263680.000900",
+    "thread_ts": "1776262980.000100",
+    "text": "rollback complete at 14:34 UTC. error rate back to baseline. p95 down to 280ms."
+  },
+  {
+    "channel": "engineering-incidents",
+    "user": "tom.walsh",
+    "ts": "1776263740.001000",
+    "thread_ts": "1776262980.000100",
+    "text": "calling it: incident resolved 14:35 UTC. total duration ~12 minutes (started 14:23). root cause TBD pending postmortem."
+  },
+  {
+    "channel": "engineering-incidents",
+    "user": "priya.sharma",
+    "ts": "1776264100.001100",
+    "thread_ts": "1776262980.000100",
+    "text": "really sorry team. that was my PR. just dug into it: fanoutNotifications opens a DB connection per recipient inside Promise.all and the error path doesn't release. with 500+ recipients on the Acme workspace it ate the pool in seconds."
+  },
+  {
+    "channel": "engineering-incidents",
+    "user": "sam.rivera",
+    "ts": "1776264220.001200",
+    "thread_ts": "1776262980.000100",
+    "text": "happens to all of us. let's add a code review checklist item for connection lifecycle in async fanout paths."
+  },
+  {
+    "channel": "engineering-incidents",
+    "user": "jordan.patel",
+    "ts": "1776264340.001300",
+    "thread_ts": "1776262980.000100",
+    "text": "Action items, owners in parens:\n1. Datadog alert when RDS connection usage > 80% (Tom)\n2. ESLint rule (or codemod) requiring connection.release() in catch/finally (Sam)\n3. Postmortem doc by Friday EOD — blameless template (Jordan)\n4. Notify Acme CS — they were impacted during their NA launch event (Alex)"
+  },
+  {
+    "channel": "engineering-incidents",
+    "user": "priya.sharma",
+    "ts": "1776264400.001400",
+    "thread_ts": "1776262980.000100",
+    "text": "I'll write the fix using a single transaction with batched inserts (no per-recipient connection). PR by tonight."
+  },
+  {
+    "channel": "engineering-incidents",
+    "user": "jordan.patel",
+    "ts": "1776357180.001500",
+    "text": "Postmortem for the 4/14 outage is up: notion.site/loopline/postmortem-2026-04-14. Blameless. Will discuss in Friday eng meeting."
+  },
+  {
+    "channel": "customer-success",
+    "user": "rachel.green",
+    "ts": "1776349380.002100",
+    "text": "team — heads up, just got an email from Derek Vasquez (VP Ops at Acme Corp). he's furious about yesterday's outage. they were running their North America launch event during it and couldn't access task boards for ~15 min. demanding a full refund of their annual contract (~$28.8K)."
+  },
+  {
+    "channel": "customer-success",
+    "user": "rachel.green",
+    "ts": "1776349440.002200",
+    "thread_ts": "1776349380.002100",
+    "text": "for context: Acme has been on Business Plus ($2,400/mo) since November, contract renews September. 47 seats. they're our largest logo right now."
+  },
+  {
+    "channel": "customer-success",
+    "user": "alex.morgan",
+    "ts": "1776349500.002300",
+    "thread_ts": "1776349380.002100",
+    "text": "ugh. ok let me look at the SLA. 99.9% monthly uptime — 12 min of downtime in April puts us at ~99.97%, still inside SLA. so no automatic credit owed under contract."
+  },
+  {
+    "channel": "customer-success",
+    "user": "ben.foster",
+    "ts": "1776349620.002400",
+    "thread_ts": "1776349380.002100",
+    "text": "we cannot lose Acme. they're our anchor case study and Derek introduced us to two of his peers last quarter. need to do something even if SLA doesn't require it."
+  },
+  {
+    "channel": "customer-success",
+    "user": "alex.morgan",
+    "ts": "1776349800.002500",
+    "thread_ts": "1776349380.002100",
+    "text": "agreed. pulling Maya in. per our policy, goodwill credits beyond 1 billing cycle need CEO approval."
+  },
+  {
+    "channel": "customer-success",
+    "user": "maya.chen",
+    "ts": "1776353400.002600",
+    "thread_ts": "1776349380.002100",
+    "text": "thanks alex. I'll call Derek personally today. plan: walk through the RCA when ready, apologize, offer 30% credit on May invoice (~$720). also offering a joint roadmap session in June so he has visibility into what we're prioritizing. that's our typical play for sub-SLA but high-impact incidents."
+  },
+  {
+    "channel": "customer-success",
+    "user": "maya.chen",
+    "ts": "1776371400.002700",
+    "thread_ts": "1776349380.002100",
+    "text": "spoke with Derek. apology landed well — he appreciated the call rather than email. accepted the 30% credit and confirmed the June roadmap session. honestly he wasn't expecting a full refund; he was venting because his CMO was in the room when it broke."
+  },
+  {
+    "channel": "customer-success",
+    "user": "rachel.green",
+    "ts": "1776371520.002800",
+    "thread_ts": "1776349380.002100",
+    "text": "huge relief. thanks for jumping on it Maya."
+  },
+  {
+    "channel": "customer-success",
+    "user": "alex.morgan",
+    "ts": "1776371700.002900",
+    "thread_ts": "1776349380.002100",
+    "text": "writing this up so we have precedent. summary:\n- sub-SLA outage during a customer's critical event => goodwill credit roughly equal to 1 billing cycle\n- pair with qualitative gestures (CEO call, roadmap session) — those often matter more than $\n- automatic SLA credits per contract still apply on top; this is in addition, case-by-case"
+  },
+  {
+    "channel": "customer-success",
+    "user": "alex.morgan",
+    "ts": "1776371820.003000",
+    "thread_ts": "1776349380.002100",
+    "text": "refresher on the actual policy for anyone unsure:\n1. Cancellation: any time, takes effect end of current billing period. no penalty.\n2. 30-day money-back: full refund within 30 days of first paid month, no questions.\n3. SLA breach (uptime <99.9% in a calendar month): automatic pro-rated credit per contract.\n4. Goodwill credits: CS lead can grant up to 1 billing cycle without escalation. 1–3 cycles needs CEO. Beyond that needs CEO + co-founders.\n5. Annual plans: cancellation does not refund unused months — converts to credit only.\nfull doc: notion.site/loopline/refund-policy"
+  },
+  {
+    "channel": "customer-success",
+    "user": "emma.schultz",
+    "ts": "1776371940.003100",
+    "thread_ts": "1776349380.002100",
+    "text": "should we update the public-facing policy with the goodwill clause? right now the help center page only mentions SLA credits."
+  },
+  {
+    "channel": "customer-success",
+    "user": "alex.morgan",
+    "ts": "1776372060.003200",
+    "thread_ts": "1776349380.002100",
+    "text": "no — keeping goodwill internal-only is intentional. it should feel like a gesture, not an entitlement. helps with negotiation leverage too."
+  },
+  {
+    "channel": "general",
+    "user": "maya.chen",
+    "ts": "1776867780.004100",
+    "text": "team — posted the new remote work policy in Notion: notion.site/loopline/remote-work\n\ntl;dr:\n1. Core hours: 10am–3pm in your local time\n2. Async-first for internal communication. default to writing > meeting\n3. Camera-on for all-hands and 1:1s. off-by-default for everything else\n4. Tuesday and Thursday are no-meeting days for makers\n\nthis mostly codifies what we already do. main change is the no-meeting days. effective today; we'll review at the May all-hands."
+  },
+  {
+    "channel": "general",
+    "user": "tom.walsh",
+    "ts": "1776867900.004200",
+    "thread_ts": "1776867780.004100",
+    "text": "love the no-meeting days. quick q on overlap — I'm in Pacific (UTC-7), Lisa is in Berlin (UTC+2). when do team-wide syncs happen?"
+  },
+  {
+    "channel": "general",
+    "user": "jordan.patel",
+    "ts": "1776868020.004300",
+    "thread_ts": "1776867780.004100",
+    "text": "we're trying a 4–7pm UTC window for cross-team syncs. that's 9am–12pm Pacific and 6–9pm Berlin. not perfect, but it's the widest overlap that doesn't kill anyone's morning or evening."
+  },
+  {
+    "channel": "general",
+    "user": "nora.lindqvist",
+    "ts": "1776868140.004400",
+    "thread_ts": "1776867780.004100",
+    "text": "5–8pm here in Stockholm. fine for me as long as it's not every day."
+  },
+  {
+    "channel": "general",
+    "user": "ben.foster",
+    "ts": "1776868260.004500",
+    "thread_ts": "1776867780.004100",
+    "text": "question — async-first feels weird for sales/CS. customers expect real-time."
+  },
+  {
+    "channel": "general",
+    "user": "maya.chen",
+    "ts": "1776868380.004600",
+    "thread_ts": "1776867780.004100",
+    "text": "good catch. async-first applies to internal coordination only. customer-facing roles obviously sync with customers per their preference. updating the doc to clarify."
+  },
+  {
+    "channel": "general",
+    "user": "emma.schultz",
+    "ts": "1776868500.004700",
+    "thread_ts": "1776867780.004100",
+    "text": "also flagging: PTO is \"responsible time off\" — take what you need, just give 2 weeks notice for anything longer than 3 days. and please actually take time off, we tracked usage last quarter and 4 of you took zero days."
+  },
+  {
+    "channel": "general",
+    "user": "lisa.okonkwo",
+    "ts": "1776868620.004800",
+    "thread_ts": "1776867780.004100",
+    "text": "the no-meeting days alone justify the policy doc. thank you."
+  },
+  {
+    "channel": "general",
+    "user": "chris.park",
+    "ts": "1776868740.004900",
+    "thread_ts": "1776867780.004100",
+    "text": "what about all-hands? still Wednesdays?"
+  },
+  {
+    "channel": "general",
+    "user": "maya.chen",
+    "ts": "1776868860.005000",
+    "thread_ts": "1776867780.004100",
+    "text": "yes — Wednesdays 5pm UTC, 30 min, camera-on. not changing."
+  }
+]
