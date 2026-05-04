@@ -1,0 +1,140 @@
+# Engineering Onboarding — Internal Handbook
+
+Maintained by: Lena Park, Engineering Manager (lena.park@loopline.com)
+Last revision: 2026-02-08
+Effective: all engineering hires, current and future
+
+## Purpose
+
+This is the canonical onboarding plan for new engineers at Loopline. We're 12 people. One badly onboarded engineer is meaningfully bad — they spend a month confused, ship slowly, lose confidence, and possibly leave. We've made that mistake. This doc is to not make it again.
+
+If you're an EM, this is your responsibility — not HR's, not the buddy's, not the new hire's. You own it.
+
+If you're a new hire reading this on day 0: skip to "Day-by-day, Week 1". Come back to the philosophy section when you have time.
+
+## Philosophy
+
+Three principles, in priority order:
+
+1. **Make it possible to ask "stupid" questions.** Most onboarding failures are questions left unasked. We have #eng-no-judgment-questions for exactly this. Default expectation: nothing is too small. We have used this channel to ask "what's our git workflow", "how do I check out a branch", "where do I run tests" — all asked by senior engineers in their first week. The pinned message reads: "No question is too small. No question is too obvious. The only wrong question is the one you didn't ask, that you spent 90 minutes searching for instead."
+
+2. **Ship something real in week 1.** Even if it's small. A typo fix, a copy change, a one-line bug fix. The point is to walk through the whole pipeline (write → review → merge → deploy → see in prod) once before getting buried in feature work.
+
+3. **Make ramp visible.** EM does a written check-in at day 14, day 30, day 60, day 90. New hire writes back. Both sides have a reference point if expectations drift.
+
+## Day-by-day, Week 1
+
+**Day 1**
+- 10:00 — Lena does a 60-min 1:1: company history, eng team intro, this doc, set up first-1:1 cadence (weekly for first 8 weeks).
+- 11:30 — IT setup with Priyanka Suresh (ops): laptop, GitHub access, AWS console (read-only initially), Linear, Slack workspace tour.
+- 13:00 — Lunch with assigned buddy (covered, $40 limit).
+- 14:00 — Buddy walks through local dev setup: clone, run, see something work locally. Goal is "hello world" — not a perfect environment.
+- 16:00 — Read the architecture overview doc + the on-call runbook. Just read; no quiz.
+
+**Day 2**
+- Goal: ship a "hello world" PR. Buddy has pre-picked something tiny — typo fix in user-facing copy is the standard one. New hire opens PR, gets reviewed, merges, watches it deploy via the GitHub Actions pipeline. End-to-end pipeline experience.
+- Begin security training. We use SafeBase. ~2.5 hours self-paced. Includes phishing simulation and OWASP top 10 walkthrough. **Must be completed by end of day 5** — this is a hard cutoff, not a soft suggestion. New hires who miss it lose laptop privileges until done.
+
+**Day 3**
+- First real ticket assigned by EM. Per our policy, this happens **within 48 hours of start**. Ticket should be 1–2 day scope, ideally in an area with reasonable test coverage. Lena pre-tags a list of "good first tickets" in Linear and picks based on background.
+- New hire pairs with buddy for the first review.
+
+**Days 4–5**
+- Continue first ticket. Goal is merge by Friday end-of-day. If it slips, that's signal — Lena and the buddy regroup on Monday morning.
+- Finish security training before logging off Friday. No exceptions.
+
+## Day-by-day, Weeks 2–4
+
+**Week 2**
+- Pick up second ticket. EM picks; new hire can object.
+- Pair for at least 2 hours per day with the buddy.
+- Attend (silently) at least one design review and one incident review.
+- **Day 14 written check-in** from Lena: how's it going, what's confusing, anything you want to change. New hire writes 1-paragraph response.
+
+**Weeks 3–4**
+- Take ownership of one small product surface or bug area.
+- Buddy moves to "ask if needed" mode rather than over-the-shoulder.
+- New hire should be merging without explicit hand-holding by end of week 4.
+- **Day 30 written check-in.** Also: Lena books prod-access training session.
+
+## Day 30 — prod write access
+
+By default, new engineers do NOT have production write access for the first 30 days. End of week 4 / start of week 5, they get it, gated on:
+
+- Security training complete (would have been kicked off the laptop at day 5 cutoff otherwise).
+- One full month of read-only prod access without incident or boundary violation.
+- 30-min "this is what you can break" talk with Lena. We literally walk through the worst things you can do: drop a table, push a config that breaks auth, run a destructive migration without the dry-run flag.
+- Manager sign-off in 1Password vault for the prod-write group.
+
+Once granted, the new hire is on the prod-write rotation but NOT yet on PagerDuty. Shadow-only on-call shifts during week 5–8.
+
+## Day 60 — buddy partnership ends
+
+The buddy partnership formally ends at day 60. By this point, new hire should be self-sufficient.
+
+- Buddy + new hire usually keep meeting informally afterward — most do.
+- Buddy gets a $200 thank-you bonus at day 60. Auto-paid via Pleo by Priyanka.
+- **Day 60 written check-in.**
+
+What the buddy did during those 60 days:
+- Daily 15-min check-in for the first 2 weeks (then less)
+- First-line for "is this normal?" questions before bothering Lena or the wider team
+- Reviewed the new hire's first 5 PRs (after that, normal review rotation)
+- Owned the day-1 and day-2 tactical onboarding (laptop, dev env, hello world)
+
+## Day 90 — full ramp
+
+By day 90, an engineer should be:
+
+- Shipping independently, no hand-holding.
+- Reviewing others' PRs.
+- Picking up tickets without direction.
+- Owning a recurring meeting or process — running one design review, owning one weekly metric, etc.
+- On the PagerDuty primary rotation.
+
+**Day 90 written check-in** is also a calibration moment: are we keeping the engineer? Are they thriving? If something is off, this is the last cheap moment to course-correct. If you're an EM and you're worried at day 90, escalate to Marcus that week — don't sit on it.
+
+## The buddy system
+
+Every new engineer is assigned a buddy on day 1.
+
+The buddy is:
+- A current engineer, ideally not on the same immediate team (cross-pollination).
+- Volunteer-only — Lena asks; engineers can decline. Most don't, but it's optional.
+- Active for 60 days.
+
+What the buddy is NOT: the new hire's manager, their first-line code reviewer indefinitely, or their tech support after day 60.
+
+## Asking questions — the 5-minute rule
+
+#eng-no-judgment-questions is the channel.
+
+The 5-minute rule is in effect: if you've been stuck on something for 5 minutes (search, docs, asking your buddy), post in the channel. Don't burn an hour.
+
+Engineers who answer questions in this channel get +1 in the quarterly recognition round. Lena tracks it — quietly. James Wong currently leads on answers; he's a good model.
+
+## What to do when something is broken in onboarding
+
+If you (the new hire) hit something that's broken — outdated doc, missing access, dev env that won't start, training that doesn't load — DO NOT push past it.
+
+- Ping #eng-onboarding (separate from #eng-no-judgment-questions) and describe what's broken.
+- Lena treats these as P1 — usually replies within an hour during business hours.
+- Once unblocked, write up what was wrong in your day-14 check-in. We update this doc when patterns emerge.
+
+The cost of fixing onboarding friction is paid once. The cost of new engineers banging their head against it compounds across every future hire.
+
+## Exceptions / non-standard cases
+
+- **Senior engineers (Staff+)**: replace the standardized first-ticket flow with a written 30-day plan from the EM. First ticket is still within 48 hours but scoped to be more strategic. Day 90 expectations are also higher — should be reviewing architecture decisions by then, not just code.
+- **Returning alumni** (anyone who left and came back): skip security training if it's been less than 12 months since their previous exit. Skip Day-1 company history. Keep everything else.
+- **Contractors**: 30-day plan applies. Prod write access does NOT — contractors stay read-only for the duration of the contract regardless of tenure. No equity grant. Use 1Password "contractor" vault group, not the staff one.
+- **Engineers in time zones >5 hours offset from PT**: Day 1 paperwork is async via Loom + DocuSign. Day 1 lunch is rescheduled to a coffee chat at the buddy's discretion. Everything else stays the same. Don't make remote-zone hires wait until they can be "in person" — that's a 3-week delay we don't accept.
+
+## Approvals at a glance
+
+- Buddy assignment → EM
+- Bonus first-ticket-scope override (e.g. larger first ticket for senior hires) → EM
+- Production write access → EM + 1Password manager sign-off
+- Skipping any of the day-1 / day-2 / security-training / day-30-prod gates → EM + Marcus (CTO). Almost never granted.
+- Extending day-60 buddy partnership → EM, no further approval needed.
+- Skipping the 90-day check-in → not allowed. If the EM tries, escalate to Marcus.

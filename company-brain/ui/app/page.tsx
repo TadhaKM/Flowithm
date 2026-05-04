@@ -4,71 +4,102 @@ import { useEffect, useState } from "react";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-const SUGGESTED_QUESTIONS = [
-  "How do we handle a customer refund?",
-  "What's the on-call runbook for a DB outage?",
-  "What is our remote work policy?",
+const DEMO_CHIPS = [
+  {
+    slug: "db_outage",
+    label: "DB outage response",
+    processName: "DB outage response",
+  },
+  {
+    slug: "refund_policy",
+    label: "Customer refund",
+    processName: "Customer refund handling",
+  },
+  {
+    slug: "onboarding",
+    label: "New hire onboarding",
+    processName: "Engineering onboarding",
+  },
 ];
 
-type Confidence = "high" | "medium" | "low";
-
-type Source = {
-  source_type: string;
-  source_name: string;
-  content_preview: string;
-};
-
-type Answer = {
-  answer: string;
-  sources: Source[];
-  confidence: Confidence;
-};
-
-type SkillStep = {
+type WorkflowStep = {
   step: number;
   action: string;
   owner: string;
   notes: string;
 };
 
-type SkillFile = {
+type Workflow = {
   process: string;
   description: string;
-  steps: SkillStep[];
+  trigger: string;
+  steps: WorkflowStep[];
   decision_rules: string[];
+  approvals: string[];
   exceptions: string[];
   sources: string[];
+  confidence?: number | string;
+  generated_at?: string;
 };
 
 export default function Home() {
-  const [input, setInput] = useState("");
-  const [submitted, setSubmitted] = useState("");
-  const [answer, setAnswer] = useState<Answer | null>(null);
+  const [content, setContent] = useState("");
+  const [processName, setProcessName] = useState("");
   const [loading, setLoading] = useState(false);
+  const [workflow, setWorkflow] = useState<Workflow | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [history, setHistory] = useState<Workflow[]>([]);
+  const [chipLoading, setChipLoading] = useState<string | null>(null);
 
-  const [skill, setSkill] = useState<SkillFile | null>(null);
-  const [skillLoading, setSkillLoading] = useState(false);
-  const [skillModalOpen, setSkillModalOpen] = useState(false);
+  useEffect(() => {
+    fetchHistory();
+  }, []);
 
-  async function ask(question: string) {
-    if (!question.trim() || loading) return;
-    setSubmitted(question);
+  async function fetchHistory() {
+    try {
+      const res = await fetch(`${API_URL}/history`);
+      if (!res.ok) return;
+      const data = (await res.json()) as Workflow[];
+      setHistory(data);
+    } catch {
+      // History is non-critical; don't surface failures.
+    }
+  }
+
+  async function loadChip(chip: (typeof DEMO_CHIPS)[number]) {
+    if (chipLoading || loading) return;
+    setChipLoading(chip.slug);
+    setError(null);
+    try {
+      const res = await fetch(`${API_URL}/demo/${chip.slug}`);
+      if (!res.ok)
+        throw new Error(`Demo not found: ${chip.slug} (HTTP ${res.status})`);
+      const text = await res.text();
+      setContent(text);
+      setProcessName(chip.processName);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setChipLoading(null);
+    }
+  }
+
+  async function generate() {
+    if (!content.trim() || !processName.trim() || loading) return;
     setLoading(true);
     setError(null);
-    setAnswer(null);
-    setSkill(null);
+    setWorkflow(null);
     try {
-      const res = await fetch(`${API_URL}/query`, {
+      const res = await fetch(`${API_URL}/workflows/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question }),
+        body: JSON.stringify({ name: processName, content }),
       });
-      if (!res.ok) {
-        throw new Error(`API ${res.status}: ${await res.text()}`);
-      }
-      const data = (await res.json()) as Answer;
-      setAnswer(data);
+      if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
+      const data = (await res.json()) as Workflow;
+      setWorkflow(data);
+      fetchHistory();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -76,93 +107,90 @@ export default function Home() {
     }
   }
 
-  async function generateSkill() {
-    if (!submitted || skillLoading) return;
-    setSkillLoading(true);
-    setError(null);
+  async function copyJson() {
+    if (!workflow) return;
     try {
-      const res = await fetch(`${API_URL}/skills`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ process_name: submitted }),
-      });
-      if (!res.ok) {
-        throw new Error(`API ${res.status}: ${await res.text()}`);
-      }
-      const data = (await res.json()) as SkillFile;
-      setSkill(data);
-      setSkillModalOpen(true);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSkillLoading(false);
+      await copyToClipboard(workflowToJson(workflow));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // ignore — clipboard might be blocked over http
     }
   }
 
-  function onSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    ask(input);
-  }
-
-  function pickSuggested(q: string) {
-    setInput(q);
-    ask(q);
-  }
-
   return (
-    <main className="min-h-screen relative">
-      <div className="bg-glow absolute inset-x-0 top-0 h-[400px] pointer-events-none" />
-
-      <div className="relative max-w-3xl mx-auto px-4 sm:px-6 pt-16 sm:pt-24 pb-24">
-        <header className="text-center mb-10">
-          <h1 className="text-4xl sm:text-5xl font-semibold tracking-tight bg-clip-text text-transparent bg-gradient-to-b from-zinc-50 to-zinc-400">
-            Company Brain
-          </h1>
-          <p className="mt-3 text-zinc-400 text-base sm:text-lg">
-            Ask anything about how Loopline works
+    <main className="min-h-screen">
+      <div className="max-w-6xl mx-auto px-6 py-8">
+        <header className="mb-12">
+          <div className="flex items-center justify-between gap-4">
+            <h1 className="text-base font-medium tracking-tight text-zinc-100">
+              Flowithm
+            </h1>
+            <p className="text-sm text-zinc-400 hidden sm:block">
+              Turn company knowledge into systems AI can run
+            </p>
+          </div>
+          <p className="mt-3 max-w-2xl text-sm text-zinc-500">
+            Most company knowledge lives in Slack, docs, and memory. Flowithm
+            turns it into structured workflows.
           </p>
         </header>
 
-        <form onSubmit={onSubmit} className="mb-3">
-          <div className="flex items-center gap-2 bg-zinc-900/80 backdrop-blur border border-zinc-800 rounded-2xl p-2 focus-within:border-indigo-500/60 focus-within:bg-zinc-900 transition-colors shadow-lg shadow-black/30">
-            <input
-              type="text"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder="Ask a question..."
-              disabled={loading}
-              autoFocus
-              className="flex-1 bg-transparent px-4 py-3 text-base sm:text-lg placeholder-zinc-500 focus:outline-none disabled:opacity-50"
-            />
-            <button
-              type="submit"
-              disabled={loading || !input.trim()}
-              className="inline-flex items-center gap-1.5 bg-indigo-500 hover:bg-indigo-400 disabled:bg-zinc-800 disabled:text-zinc-600 text-white font-medium px-4 py-2.5 rounded-xl transition-colors shadow-md shadow-indigo-500/20"
-            >
-              {loading ? (
-                <Spinner />
-              ) : (
-                <>
-                  <span>Send</span>
-                  <SendIcon />
-                </>
-              )}
-            </button>
+        <section className="mb-14 border-b border-zinc-800/80 pb-10">
+          <div className="mb-4">
+            <h2 className="text-[11px] uppercase tracking-wider text-zinc-500 font-medium">
+              Input Section
+            </h2>
           </div>
-        </form>
+          <textarea
+            value={content}
+            onChange={(e) => setContent(e.target.value)}
+            placeholder="Paste Slack threads, docs, meeting notes, runbooks..."
+            disabled={loading}
+            className="w-full h-[180px] bg-zinc-900 border border-zinc-800 rounded-xl px-4 py-3 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-[#1D9E75]/60 resize-none transition-colors disabled:opacity-60"
+          />
+          <p className="mt-2 text-xs text-zinc-500">
+            Paste internal docs or Slack threads to generate an executable
+            workflow
+          </p>
 
-        <div className="flex flex-wrap gap-2 mb-10 justify-center">
-          {SUGGESTED_QUESTIONS.map((q) => (
-            <button
-              key={q}
-              onClick={() => pickSuggested(q)}
-              disabled={loading}
-              className="text-xs sm:text-sm bg-zinc-900/60 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 text-zinc-300 hover:text-zinc-100 px-3 py-1.5 rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {q}
-            </button>
-          ))}
-        </div>
+          <input
+            type="text"
+            value={processName}
+            onChange={(e) => setProcessName(e.target.value)}
+            placeholder="Process name (e.g. Customer refund handling)"
+            disabled={loading}
+            className="mt-3 w-full bg-zinc-900 border border-zinc-800 rounded-xl px-4 py-3 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-[#1D9E75]/60 transition-colors disabled:opacity-60"
+          />
+
+          <div className="flex flex-wrap items-center gap-3 mt-5">
+            <span className="text-xs text-zinc-500 mr-1">Try a demo:</span>
+            {DEMO_CHIPS.map((chip) => (
+              <button
+                key={chip.slug}
+                onClick={() => loadChip(chip)}
+                disabled={chipLoading !== null || loading}
+                className="text-sm bg-zinc-900 hover:bg-zinc-800 hover:brightness-110 border border-zinc-800 hover:border-zinc-700 text-zinc-300 hover:text-zinc-100 px-3.5 py-2 rounded-full transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {chipLoading === chip.slug ? "Loading…" : chip.label}
+              </button>
+            ))}
+          </div>
+
+          <button
+            onClick={generate}
+            disabled={!content.trim() || !processName.trim() || loading}
+            className="mt-6 w-full inline-flex items-center justify-center gap-2 bg-[#1D9E75] hover:bg-[#25b88a] disabled:bg-zinc-800 disabled:text-zinc-600 text-white font-medium px-5 py-4 rounded-xl transition-colors shadow-lg shadow-[#1D9E75]/20"
+          >
+            {loading ? (
+              <>
+                <Spinner /> Generating workflow…
+              </>
+            ) : (
+              "Generate workflow"
+            )}
+          </button>
+        </section>
 
         {error && (
           <div className="bg-rose-950/40 border border-rose-900/60 text-rose-200 rounded-xl p-4 mb-6 text-sm">
@@ -170,275 +198,348 @@ export default function Home() {
           </div>
         )}
 
-        {loading && <LoadingSkeleton />}
+        {workflow && (
+          <section
+            key={workflow.generated_at ?? workflow.process}
+            className="animate-fade-in"
+          >
+            <div className="mb-4">
+              <h2 className="text-[11px] uppercase tracking-wider text-zinc-500 font-medium">
+                Output Section
+              </h2>
+              <p className="mt-2 text-[15px] font-medium text-zinc-300">
+                This workflow can be executed by an AI agent or a human.
+              </p>
+            </div>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <WorkflowPanel workflow={workflow} />
+              <SkillsFilePanel
+                workflow={workflow}
+                copied={copied}
+                onCopy={copyJson}
+              />
+            </div>
+          </section>
+        )}
 
-        {!loading && answer && (
-          <AnswerCard
-            answer={answer}
-            onGenerateSkill={generateSkill}
-            skillLoading={skillLoading}
-          />
+        {history.length > 0 && (
+          <section className="mt-14">
+            <h3 className="text-xs uppercase tracking-wider text-zinc-500 font-medium mb-3">
+              Recent workflows
+            </h3>
+            <div className="flex gap-3 overflow-x-auto pb-2 scrollbar-thin">
+              {history.map((wf, i) => (
+                <button
+                  key={i}
+                  onClick={() => setWorkflow(wf)}
+                  className="shrink-0 text-left bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 rounded-lg px-3 py-2.5 transition-colors min-w-[180px] max-w-[240px]"
+                >
+                  <p className="text-sm font-medium text-zinc-100 truncate">
+                    {wf.process}
+                  </p>
+                  <p className="text-xs text-zinc-500 mt-0.5">
+                    {relativeTime(wf.generated_at)}
+                  </p>
+                </button>
+              ))}
+            </div>
+          </section>
         )}
       </div>
-
-      {skillModalOpen && skill && (
-        <SkillsModal skill={skill} onClose={() => setSkillModalOpen(false)} />
-      )}
     </main>
   );
 }
 
 // --------------------------------------------------------------------------
-// Components
+// Output panels
 // --------------------------------------------------------------------------
 
-function LoadingSkeleton() {
+function WorkflowPanel({ workflow }: { workflow: Workflow }) {
   return (
-    <div className="bg-zinc-900/80 border border-zinc-800 rounded-2xl p-6 animate-pulse">
-      <div className="flex items-center justify-between mb-5">
-        <div className="h-3 w-16 bg-zinc-800 rounded" />
-        <div className="h-5 w-28 bg-zinc-800 rounded-full" />
+    <article className="bg-zinc-900 border border-zinc-800 rounded-xl p-6">
+      <div className="text-[10px] uppercase tracking-wider text-zinc-500 font-medium mb-3">
+        Workflow
       </div>
-      <div className="space-y-3">
-        <div className="h-4 bg-zinc-800 rounded w-full" />
-        <div className="h-4 bg-zinc-800 rounded w-11/12" />
-        <div className="h-4 bg-zinc-800 rounded w-4/5" />
-        <div className="h-4 bg-zinc-800 rounded w-3/4" />
-      </div>
-      <div className="flex gap-2 mt-6 pt-5 border-t border-zinc-800">
-        <div className="h-7 w-32 bg-zinc-800 rounded-full" />
-        <div className="h-7 w-28 bg-zinc-800 rounded-full" />
-        <div className="h-7 w-24 bg-zinc-800 rounded-full" />
-      </div>
-    </div>
-  );
-}
+      <h2 className="text-xl font-medium text-zinc-100">{workflow.process}</h2>
+      {workflow.trigger && (
+        <div className="mt-5 rounded-lg border border-zinc-800 bg-zinc-950/45 px-3 py-2.5">
+          <div className="text-[10px] uppercase tracking-wider text-zinc-500 font-medium">
+            Trigger
+          </div>
+          <p className="mt-1 text-sm text-zinc-300">{workflow.trigger}</p>
+        </div>
+      )}
 
-function AnswerCard({
-  answer,
-  onGenerateSkill,
-  skillLoading,
-}: {
-  answer: Answer;
-  onGenerateSkill: () => void;
-  skillLoading: boolean;
-}) {
-  return (
-    <article className="bg-zinc-900/80 backdrop-blur border border-zinc-800 rounded-2xl p-6 shadow-xl shadow-black/30">
-      <div className="flex items-center justify-between mb-5">
-        <h2 className="text-xs uppercase tracking-wider text-zinc-500 font-medium">
-          Answer
-        </h2>
-        <ConfidenceBadge level={answer.confidence} />
-      </div>
-
-      <div className="text-zinc-100 leading-relaxed whitespace-pre-wrap text-[15px]">
-        {answer.answer}
-      </div>
-
-      {answer.sources.length > 0 && (
-        <div className="mt-6 pt-5 border-t border-zinc-800">
-          <h3 className="text-xs uppercase tracking-wider text-zinc-500 font-medium mb-3">
-            Sources
+      {workflow.steps.length > 0 && (
+        <div className="mt-6">
+          <h3 className="text-xs uppercase tracking-wider text-zinc-500 font-medium mb-4">
+            Execution Steps
           </h3>
-          <div className="flex flex-wrap gap-2">
-            {answer.sources.map((s, i) => (
-              <SourcePill key={i} source={s} index={i + 1} />
+          <ol className="space-y-4">
+            {workflow.steps.map((s) => (
+              <li
+                key={s.step}
+                className="flex gap-3 rounded-lg border border-zinc-800 bg-zinc-950/35 p-3.5"
+              >
+                <span className="flex items-center justify-center shrink-0 w-7 h-7 rounded-full bg-[#1D9E75]/15 border border-[#1D9E75]/35 text-[12px] font-semibold text-emerald-300">
+                  {s.step}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-semibold text-zinc-100">
+                    {s.action}
+                  </p>
+                  {s.notes && (
+                    <div className="mt-2 border-l-2 border-[#1D9E75] bg-zinc-900/80 pl-3 pr-3 py-2 text-[13px] text-zinc-300 rounded-r">
+                      {s.notes}
+                    </div>
+                  )}
+                  {s.owner && s.owner !== "unspecified" && (
+                    <p className="mt-2 text-xs font-medium text-zinc-300">
+                      👤 {s.owner}
+                    </p>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
+
+      {workflow.decision_rules.length > 0 && (
+        <div className="mt-6">
+          <h3 className="text-xs uppercase tracking-wider text-zinc-500 font-medium mb-3">
+            Decision Rules
+          </h3>
+          <div className="space-y-2">
+            {workflow.decision_rules.map((rule, i) => (
+              <div
+                key={i}
+                className="border-l-2 border-[#1D9E75] bg-zinc-800/60 pl-3 pr-3 py-2 text-[13px] text-zinc-200 rounded-r"
+              >
+                {rule}
+              </div>
             ))}
           </div>
         </div>
       )}
 
-      <div className="mt-6 pt-5 border-t border-zinc-800 flex justify-end">
-        <button
-          onClick={onGenerateSkill}
-          disabled={skillLoading}
-          className="inline-flex items-center gap-2 text-sm bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed border border-zinc-700 hover:border-zinc-600 text-zinc-100 px-4 py-2 rounded-lg transition-colors"
-        >
-          {skillLoading ? (
-            <>
-              <Spinner /> Generating skills file...
-            </>
-          ) : (
-            <>
-              <SparkleIcon /> Generate Skills File
-            </>
-          )}
-        </button>
-      </div>
+      {workflow.approvals.length > 0 && (
+        <div className="mt-6">
+          <h3 className="text-xs uppercase tracking-wider text-zinc-500 font-medium mb-3">
+            Approvals
+          </h3>
+          <div className="space-y-2">
+            {workflow.approvals.map((approval, i) => (
+              <div
+                key={i}
+                className="border-l-2 border-amber-500 bg-amber-500/5 pl-3 pr-3 py-2 text-[13px] text-amber-100/90 rounded-r"
+              >
+                {approval}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {workflow.exceptions.length > 0 && (
+        <div className="mt-6">
+          <h3 className="text-xs uppercase tracking-wider text-zinc-500 font-medium mb-3">
+            Exceptions
+          </h3>
+          <div className="flex flex-wrap gap-2">
+            {workflow.exceptions.map((exc, i) => (
+              <span
+                key={i}
+                className="text-xs bg-zinc-800 text-zinc-400 border border-zinc-700/60 px-2.5 py-1 rounded-full"
+              >
+                {exc}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
     </article>
   );
 }
 
-function ConfidenceBadge({ level }: { level: Confidence }) {
-  const styles: Record<Confidence, { wrap: string; dot: string }> = {
-    high: {
-      wrap: "bg-emerald-500/10 text-emerald-300 border-emerald-500/30",
-      dot: "bg-emerald-400",
-    },
-    medium: {
-      wrap: "bg-amber-500/10 text-amber-300 border-amber-500/30",
-      dot: "bg-amber-400",
-    },
-    low: {
-      wrap: "bg-rose-500/10 text-rose-300 border-rose-500/30",
-      dot: "bg-rose-400",
-    },
-  };
-  const s = styles[level];
-  return (
-    <span
-      className={`inline-flex items-center gap-1.5 text-[10px] uppercase tracking-widest font-medium border rounded-full px-2.5 py-1 ${s.wrap}`}
-    >
-      <span className={`w-1.5 h-1.5 rounded-full ${s.dot} animate-pulse`} />
-      {level} confidence
-    </span>
-  );
-}
-
-function SourcePill({ source, index }: { source: Source; index: number }) {
-  return (
-    <span
-      className="group inline-flex items-center gap-1.5 text-xs bg-zinc-800/80 hover:bg-zinc-800 border border-zinc-700/60 hover:border-zinc-700 rounded-full pl-2 pr-3 py-1 transition-colors cursor-default max-w-full"
-      title={source.content_preview}
-    >
-      <span className="text-zinc-500 text-[10px] font-mono">[{index}]</span>
-      <SourceIcon type={source.source_type} />
-      <span className="text-zinc-300 group-hover:text-zinc-100 truncate">
-        {source.source_name}
-      </span>
-    </span>
-  );
-}
-
-function SourceIcon({ type }: { type: string }) {
-  const cls = "w-3.5 h-3.5 text-zinc-400 shrink-0";
-  const t = type.toLowerCase();
-  if (t === "slack") return <SlackIcon className={cls} />;
-  if (t === "notion") return <NotionIcon className={cls} />;
-  if (t === "github") return <GitHubIcon className={cls} />;
-  return <DocIcon className={cls} />;
-}
-
-function SkillsModal({
-  skill,
-  onClose,
+function SkillsFilePanel({
+  workflow,
+  copied,
+  onCopy,
 }: {
-  skill: SkillFile;
-  onClose: () => void;
+  workflow: Workflow;
+  copied: boolean;
+  onCopy: () => void;
 }) {
-  useEffect(() => {
-    function handler(e: KeyboardEvent) {
-      if (e.key === "Escape") onClose();
-    }
-    window.addEventListener("keydown", handler);
-    document.body.style.overflow = "hidden";
-    return () => {
-      window.removeEventListener("keydown", handler);
-      document.body.style.overflow = "";
-    };
-  }, [onClose]);
+  const json = workflowToJson(workflow);
+  const displayJson = formatDisplayJson(json);
+  const [simulating, setSimulating] = useState(false);
+  const [simulatedSteps, setSimulatedSteps] = useState<WorkflowStep[]>([]);
 
-  const json = JSON.stringify(skill, null, 2);
-  const [copied, setCopied] = useState(false);
-
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(json);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // ignore — clipboard might be blocked over http
+  async function simulateExecution() {
+    if (simulating) return;
+    setSimulating(true);
+    setSimulatedSteps([]);
+    for (const step of workflow.steps) {
+      await delay(400);
+      setSimulatedSteps((current) => [...current, step]);
     }
+    setSimulating(false);
   }
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
-      onClick={onClose}
-    >
-      <div
-        className="bg-zinc-900 border border-zinc-800 rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between gap-4 px-5 py-4 border-b border-zinc-800">
-          <div className="min-w-0">
-            <h2 className="text-base font-medium text-zinc-100">Skills file</h2>
-            <p className="text-xs text-zinc-500 mt-0.5 truncate">
-              {skill.process}
-            </p>
-          </div>
-          <div className="flex items-center gap-2 shrink-0">
-            <button
-              onClick={copy}
-              className="text-xs bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-200 px-2.5 py-1.5 rounded-md transition-colors"
-            >
-              {copied ? "Copied" : "Copy"}
-            </button>
-            <button
-              onClick={onClose}
-              className="text-zinc-400 hover:text-zinc-100 transition-colors p-1 rounded"
-              aria-label="Close"
-            >
-              <CloseIcon />
-            </button>
-          </div>
+    <article className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 flex flex-col">
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[10px] uppercase tracking-wider text-zinc-500 font-medium">
+            Executable workflow
+          </span>
+          <span className="text-[10px] uppercase tracking-wider font-medium bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 rounded-full px-2 py-0.5">
+            AI-Executable
+          </span>
+          {workflow.confidence !== undefined && (
+            <ConfidenceBadge value={workflow.confidence} />
+          )}
         </div>
-        <div className="overflow-auto scrollbar-thin p-4 flex-1">
-          <pre
-            className="text-[12.5px] sm:text-sm font-mono leading-relaxed text-zinc-300 whitespace-pre"
-            dangerouslySetInnerHTML={{ __html: highlightJson(json) }}
-          />
-        </div>
+        <button
+          onClick={onCopy}
+          className="text-xs bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-200 px-2.5 py-1.5 rounded-md transition-colors"
+        >
+          {copied ? "Copied!" : "Copy JSON"}
+        </button>
       </div>
-    </div>
+
+      <pre
+        className="font-mono text-[12.5px] leading-7 bg-zinc-950 border border-zinc-800 rounded-lg p-4 text-zinc-300 overflow-auto max-h-[520px] whitespace-pre-wrap break-words scrollbar-thin"
+        dangerouslySetInnerHTML={{ __html: highlightWorkflowJson(displayJson) }}
+      />
+
+      <button
+        onClick={simulateExecution}
+        disabled={simulating || workflow.steps.length === 0}
+        className="mt-4 inline-flex items-center justify-center gap-2 bg-zinc-800 hover:bg-zinc-700 disabled:bg-zinc-900 disabled:text-zinc-600 border border-zinc-700 disabled:border-zinc-800 text-zinc-100 text-sm font-medium px-3 py-2.5 rounded-lg transition-colors"
+      >
+        {simulating && <Spinner />}
+        Simulate execution
+      </button>
+
+      {simulatedSteps.length > 0 && (
+        <ol className="mt-3 space-y-2">
+          {simulatedSteps.map((step) => (
+            <li
+              key={step.step}
+              className="text-sm text-zinc-300 bg-zinc-950/60 border border-zinc-800 rounded-lg px-3 py-2 animate-fade-in"
+            >
+              Step {step.step} → {step.action}
+            </li>
+          ))}
+        </ol>
+      )}
+
+      {workflow.sources.length > 0 && (
+        <p className="mt-4 text-xs text-zinc-500">
+          <span className="text-zinc-600">Sources:</span>{" "}
+          {workflow.sources.join(", ")}
+        </p>
+      )}
+    </article>
   );
 }
 
-// JSON.stringify is safe to render after HTML-escaping the string. The
-// regex then wraps tokens in <span> tags for color. Tokens never contain
-// raw HTML because we escape `<`, `>`, `&` first.
-function highlightJson(json: string): string {
+// --------------------------------------------------------------------------
+// Helpers
+// --------------------------------------------------------------------------
+
+function workflowToJson(wf: Workflow): string {
+  // The skill file is a clean payload — drop history-only metadata.
+  const { generated_at: _gen, ...payload } = wf;
+  return JSON.stringify(payload, null, 2);
+}
+
+function formatDisplayJson(json: string): string {
+  return json.replace(
+    /\n  "(steps|decision_rules|approvals|exceptions|sources|confidence)":/g,
+    '\n\n  "$1":',
+  );
+}
+
+function highlightWorkflowJson(json: string): string {
+  // Escape HTML first so any `<`, `>`, `&` inside string values render safely.
   const escaped = json
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
 
   return escaped.replace(
-    /("(?:\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(?:true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
+    /"(?:\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?/g,
     (match) => {
-      let cls = "text-emerald-400"; // number
-      if (/^"/.test(match)) {
-        cls = /:$/.test(match) ? "text-sky-400" : "text-amber-300";
-      } else if (match === "true" || match === "false") {
-        cls = "text-purple-400";
-      } else if (match === "null") {
-        cls = "text-rose-400";
-      }
-      return `<span class="${cls}">${match}</span>`;
+      const isKey = /:\s*$/.test(match);
+      const color = isKey ? "#34d399" : "#c4b5fd";
+      return `<span style="color:${color}">${match}</span>`;
     },
   );
 }
 
-// --------------------------------------------------------------------------
-// Icons (inline SVG — no icon library)
-// --------------------------------------------------------------------------
+async function copyToClipboard(text: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
 
-function SendIcon() {
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  document.body.removeChild(textarea);
+  if (!copied) throw new Error("Clipboard copy failed");
+}
+
+function ConfidenceBadge({ value }: { value: number | string }) {
+  const label = String(value).toLowerCase();
+  const numeric = typeof value === "number" ? value : Number.parseFloat(value);
+  const normalized = numeric > 1 ? numeric / 100 : numeric;
+  const tone =
+    label.includes("high") ||
+    (Number.isFinite(normalized) && normalized >= 0.8)
+      ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+      : label.includes("medium") ||
+          (Number.isFinite(normalized) && normalized >= 0.5)
+        ? "bg-amber-500/15 text-amber-200 border-amber-500/30"
+        : "bg-rose-500/15 text-rose-200 border-rose-500/30";
+
   return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2.4"
-      strokeLinecap="round"
-      strokeLinejoin="round"
+    <span
+      className={`text-[10px] uppercase tracking-wider font-medium border rounded-full px-2 py-0.5 ${tone}`}
     >
-      <path d="M5 12h14M13 5l7 7-7 7" />
-    </svg>
+      Confidence {String(value)}
+    </span>
   );
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function relativeTime(iso?: string): string {
+  if (!iso) return "";
+  const ms = Date.now() - new Date(iso).getTime();
+  if (Number.isNaN(ms) || ms < 0) return "";
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return "just now";
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  if (d < 7) return `${d}d ago`;
+  const w = Math.floor(d / 7);
+  if (w < 4) return `${w}w ago`;
+  const mo = Math.floor(d / 30);
+  return `${mo}mo ago`;
 }
 
 function Spinner() {
@@ -464,83 +565,6 @@ function Spinner() {
         strokeWidth="3"
         strokeLinecap="round"
       />
-    </svg>
-  );
-}
-
-function SparkleIcon() {
-  return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M12 3l1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9z" />
-      <path d="M19 15l.7 1.7L21.5 17.5l-1.8.8L19 20l-.7-1.7L16.5 17.5l1.8-.8z" />
-    </svg>
-  );
-}
-
-function CloseIcon() {
-  return (
-    <svg
-      width="18"
-      height="18"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <line x1="18" y1="6" x2="6" y2="18" />
-      <line x1="6" y1="6" x2="18" y2="18" />
-    </svg>
-  );
-}
-
-function SlackIcon({ className }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 24 24" className={className} fill="currentColor">
-      <path d="M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52zM6.313 15.165a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313zM8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834zM8.834 6.313a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312zM18.956 8.834a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834zM17.688 8.834a2.528 2.528 0 0 1-2.523 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.165 0a2.528 2.528 0 0 1 2.523 2.522v6.312zM15.165 18.956a2.528 2.528 0 0 1 2.523 2.522A2.528 2.528 0 0 1 15.165 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52zM15.165 17.688a2.527 2.527 0 0 1-2.52-2.523 2.526 2.526 0 0 1 2.52-2.52h6.313A2.527 2.527 0 0 1 24 15.165a2.528 2.528 0 0 1-2.522 2.523h-6.313z" />
-    </svg>
-  );
-}
-
-function NotionIcon({ className }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 24 24" className={className} fill="currentColor">
-      <path d="M4.459 4.208c.746.606 1.026.56 2.428.466l13.215-.793c.28 0 .047-.28-.046-.326L17.86 1.968c-.42-.326-.981-.7-2.055-.607L3.01 2.295c-.466.046-.56.28-.374.466zm.793 3.08v13.904c0 .747.373 1.027 1.214.98l14.523-.84c.841-.046.935-.56.935-1.167V6.354c0-.606-.233-.933-.748-.887l-15.177.887c-.56.047-.747.327-.747.933zm14.337.745c.093.42 0 .84-.42.888l-.7.14v10.264c-.608.327-1.168.514-1.635.514-.748 0-.935-.234-1.495-.933l-4.577-7.186v6.952l1.448.327s0 .84-1.169.84l-3.222.186c-.093-.186 0-.653.327-.746l.84-.233V9.854L7.822 9.76c-.094-.42.14-1.026.793-1.073l3.456-.233 4.764 7.279v-6.44l-1.215-.139c-.093-.514.28-.887.747-.933z" />
-    </svg>
-  );
-}
-
-function GitHubIcon({ className }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 24 24" className={className} fill="currentColor">
-      <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z" />
-    </svg>
-  );
-}
-
-function DocIcon({ className }: { className?: string }) {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      className={className}
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-      <polyline points="14 2 14 8 20 8" />
     </svg>
   );
 }

@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Company Brain — Loopline",
-  description: "Ask anything about how Loopline works",
+  title: "Flowithm",
+  description: "Turn company knowledge into systems AI can run",
 };
 
 export default function RootLayout({

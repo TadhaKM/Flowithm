@@ -1,0 +1,95 @@
+=== #engineering-incidents — Tuesday, April 21, 2026 ===
+
+[02:14] PagerDuty: P1: api-prod p95 latency > 8000ms (threshold 2000ms). 14 min sustained. Service: api-prod. Region: us-east-1. Runbook: notion.so/loopline/runbooks/api-latency
+
+[02:15] sarah.chen: ack — on it. opening datadog now.
+
+[02:16] sarah.chen: ok this is bad. p95 actually closer to 12s. Error rate ~18% on /api/v1/projects, climbing. 5xx everywhere.
+
+[02:17] sarah.chen: also seeing CPU pegged on prod-db-1 (97%). Connection wait time went from <5ms to 2.4s.
+
+[02:18] sarah.chen: declaring SEV-2. cc @marcus.holt @james.wong
+
+[02:19] marcus.holt: awake. what's the trigger event — anything just deploy?
+
+[02:20] sarah.chen: yeah. v3.4.2 went out at 22:31 last night. james's PR — projects-list overhaul. about 4hrs of low traffic before things got bad. asia is waking up so traffic is ramping.
+
+[02:21] sarah.chen: pulling slow query logs.
+
+[02:24] sarah.chen: found it. new query in projects-list:
+
+  SELECT p.*, COUNT(t.id) as task_count
+  FROM projects p
+  LEFT JOIN tasks t ON t.project_id = p.id
+  WHERE p.workspace_id = $1
+  GROUP BY p.id
+  ORDER BY p.updated_at DESC
+
+[02:25] sarah.chen: no index on tasks.project_id. or rather — there WAS one, and it got dropped in the same migration. sequential scan against 4.2M rows on tasks per request. that explains everything.
+
+[02:26] marcus.holt: jesus. ok. james — you online?
+
+[02:28] james.wong: just woke up. yes online. checking.
+
+[02:29] james.wong: oh god. the migration was supposed to add a composite index (workspace_id, project_id) and drop the single-column one. The new index didn't actually create — i think CONCURRENTLY failed silently in CI but the down migration was already gone by then. so we shipped with no index.
+
+[02:30] marcus.holt: rollback. now. don't try to forward-fix at 2am.
+
+[02:31] sarah.chen: rolling to v3.4.1. ETA 4 min.
+
+[02:33] priya.r: jumping in. anything I can do?
+
+[02:34] sarah.chen: keep an eye on db CPU as v3.4.1 comes up. should drop fast once the new code path stops hitting it.
+
+[02:35] sarah.chen: rollback deploy started at 02:32. ECS service stable on v3.4.1 at 02:36.
+
+[02:38] sarah.chen: db CPU dropping — 87, 71, 52, 38. p95 down to 1.2s.
+
+[02:41] sarah.chen: p95 at 280ms. error rate 0.4%. back to baseline.
+
+[02:43] sarah.chen: appears resolved. holding for 5 min before declaring.
+
+[02:48] sarah.chen: clean for 5+ min. declaring resolved at 02:48.
+
+[02:51] sarah.chen: customer impact summary: ~2,200 active workspaces saw degraded /projects. 4 enterprise customers (Sentinel, Northwind, Acme, Helios) had at least one failed page load. Pingdom logged 31 min of >5% error rate. status page updated, retroactively backdated to 02:00 UTC since that's when the slow query started impacting users.
+
+[02:55] marcus.holt: total time from page → resolved: 94 min (02:14 → 02:48 + 5min hold). good work everyone. james — write the migration RCA tomorrow morning, not tonight. sleep.
+
+[02:56] james.wong: I'm sorry. should not have shipped that.
+
+[02:57] marcus.holt: blameless. system let it through — that's what postmortem is for. go to bed.
+
+[03:48] marcus.holt: incident channel closing. postmortem doc due Friday EOD. action items so far:
+  1. slow-query monitor in datadog: alert if any query > 500ms hits > 5x/min (owner: sarah, due: this week)
+  2. EXPLAIN ANALYZE required on PRs touching projects/tasks tables — block merge without it (owner: marcus, in CI: priya)
+  3. pre-deploy load test: stage hits staging-replica with prod-shape traffic for 30 min before promotion (owner: priya, due: end of month)
+  4. migration safety: any DROP INDEX needs a paired ADD INDEX completed and verified before merge (owner: james, also write the eng RFC)
+  5. CONCURRENTLY index creates need explicit verification step, not silent assume-success (owner: james)
+  6. customer comms: send proactive note to the 4 enterprises affected by EOD wednesday (owner: alex.morgan in CS)
+
+[03:49] sarah.chen: I'll close the war room. logging off for real now.
+
+[03:50] marcus.holt: thanks sarah. day off tomorrow. don't argue.
+
+=== Postmortem doc — created Friday April 24 by marcus.holt ===
+
+## Summary
+At 02:14 UTC Tuesday April 21, 2026, api-prod began returning elevated 5xx and severe latency on /api/v1/projects. Root cause: missing index on tasks.project_id following a botched migration in v3.4.2. Sarah Chen (on-call) detected at 02:14, diagnosed by 02:24, rolled back at 02:32, fully resolved at 02:48. Total customer-impacting time: 48 minutes. Total incident lifecycle (page → all-clear): 94 minutes.
+
+## Customer impact
+~2,200 workspaces affected. Four enterprise accounts saw failed page loads. SLA status: still within 99.9% monthly (down to 99.97%), no automatic credits owed. Goodwill credit decision deferred to CS lead per refund policy.
+
+## Five whys
+1. Why did /projects fail? Sequential scan on 4.2M-row tasks table per request.
+2. Why was there no index? Migration in v3.4.2 dropped the old single-column index and was supposed to add a composite (workspace_id, project_id), but the CONCURRENTLY ADD INDEX silently failed.
+3. Why did it silently fail? CI doesn't validate that ADD INDEX CONCURRENTLY actually completed; we trusted exit codes.
+4. Why did we ship with that gap? No load test against prod-shaped data — staging hits a tiny dataset where seq scans are fine.
+5. Why no load test? Backlog. We've talked about it for 6 months.
+
+## Action items (assigned above, repeated for tracking)
+[1] Slow-query monitor — sarah.chen — DOING
+[2] EXPLAIN ANALYZE required in PR review — marcus.holt + priya.r — DONE in CI as of Apr 23
+[3] Pre-deploy load test — priya.r — TARGET end of April
+[4] DROP INDEX paired with verified ADD INDEX — james.wong — RFC drafted
+[5] CONCURRENTLY verification step — james.wong — DONE in deploy script as of Apr 22
+[6] Customer comms — alex.morgan — SENT Wednesday

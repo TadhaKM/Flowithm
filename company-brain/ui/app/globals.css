@@ -17,13 +17,20 @@ body {
   text-rendering: optimizeLegibility;
 }
 
-/* Soft indigo glow behind the header */
-.bg-glow {
-  background: radial-gradient(
-    ellipse 80% 50% at 50% -20%,
-    rgba(99, 102, 241, 0.18),
-    transparent 70%
-  );
+/* Output panels fade in on generation complete */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fadeIn 300ms ease-out forwards;
 }
 
 /* Slim scrollbar inside the skills modal */

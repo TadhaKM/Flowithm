@@ -50,25 +50,46 @@ create table if not exists chunks (
 -- Generated process documents. Each row is a "how we do X" skill that the
 -- API distilled from chunks. Surfaced to the user as Markdown skill files.
 create table if not exists skills (
-    id            uuid          primary key default gen_random_uuid(),
+    id              uuid          primary key default gen_random_uuid(),
 
-    -- Short slug-like name, e.g. "onboard-new-hire". Used as the skill
-    -- filename when the API writes it to disk.
-    process_name  text          not null,
+    -- Short slug-like name, e.g. "onboard-new-hire".
+    process_name    text          not null,
 
-    -- One-line summary shown in skill listings and in the skill frontmatter.
-    description   text          not null,
+    -- One-line summary surfaced in listings and frontmatter.
+    description     text          not null default '',
 
-    -- Ordered list of steps. JSONB (not text) so we can render structured
-    -- step lists in the UI without re-parsing Markdown.
-    steps         jsonb         not null default '[]'::jsonb,
+    -- What kicks off this process. Named process_trigger because TRIGGER is
+    -- a Postgres reserved word and the unquoted form would refuse to parse.
+    -- The /workflows/generate JSON exposes this field as `trigger` — the
+    -- store layer maps between the two.
+    process_trigger text          not null default '',
 
-    -- Array of chunk ids the skill was distilled from. Lets the UI link
-    -- each skill back to its underlying evidence.
-    sources       jsonb         not null default '[]'::jsonb,
+    -- Ordered list of {step, action, owner, notes}. JSONB so we can render
+    -- structured steps in the UI without re-parsing Markdown.
+    steps           jsonb         not null default '[]'::jsonb,
 
-    generated_at  timestamptz   not null default now()
+    -- if-this-then-that statements grounded in the source material.
+    decision_rules  jsonb         not null default '[]'::jsonb,
+
+    -- Authorization gates ("CFO must sign off on credits over 1 cycle").
+    approvals       jsonb         not null default '[]'::jsonb,
+
+    -- Scenarios where the default process does not apply.
+    exceptions      jsonb         not null default '[]'::jsonb,
+
+    -- Source labels (e.g. "slack:engineering-incidents", "notion:Refund Policy").
+    sources         jsonb         not null default '[]'::jsonb,
+
+    generated_at    timestamptz   not null default now()
 );
+
+-- Idempotent migrations for installations created before the workflow fields
+-- existed. Safe to re-run; each ALTER is a no-op once the column is in place.
+alter table skills add column if not exists process_trigger text not null default '';
+alter table skills add column if not exists decision_rules jsonb not null default '[]'::jsonb;
+alter table skills add column if not exists approvals      jsonb not null default '[]'::jsonb;
+alter table skills add column if not exists exceptions     jsonb not null default '[]'::jsonb;
+alter table skills alter column description set default '';
 
 
 -- ---------------------------------------------------------------------------

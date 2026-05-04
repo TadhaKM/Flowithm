@@ -1,0 +1,118 @@
+# Refund Policy — Internal
+
+Owner: Alex Morgan, Customer Success Lead (alex.morgan@loopline.com)
+Last reviewed: 2026-03-12
+Next review: 2026-09-12
+Approvers of last revision: Marcus Holt (CTO), Maya Chen (CEO)
+
+## Overview
+
+This document is the internal source of truth for all refund decisions at Loopline. The customer-facing version lives at loopline.com/policies/refunds — keep them in sync at the next quarterly review. This doc has more detail and explicit edge cases.
+
+If you're a CS rep reading this for the first time: the short version is in the Quick Reference at the bottom. Read that first, then come back.
+
+## The 30-day window
+
+Customers can request a refund within 30 days of their first paid charge. The clock starts on first successful charge — not signup, not trial start. After 30 days, refunds become discretionary (see "Partial refunds" below).
+
+Eligibility checks before processing any refund:
+1. Has the customer been charged at least once? (Trial-only accounts → no refund needed, just cancel the trial.)
+2. Is the charge less than 30 days old? Use Stripe's `created` timestamp on the Charge object, not our `subscriptions.created_at`. They sometimes differ by minutes.
+3. Has this customer received a refund on a prior subscription? If yes, escalate to Alex Morgan before processing — repeat refunds are a fraud signal.
+
+## Always-approved categories
+
+These refunds are processed without escalation, regardless of amount or window:
+
+1. **Enterprise / VIP customers** (any tier, any amount) — refund any amount, any reason, within reason. Don't argue, don't ask for documentation. Loop in their AE in #cs-enterprise so the account team isn't surprised.
+2. **Defective product** — if the customer can demonstrate the product didn't work as advertised (specific feature broken, repeated downtime, data loss): full refund, no questions, no required documentation. We eat that one. Be generous in interpretation. If a customer says "X was supposed to work and didn't, I want my money back", we believe them unless server logs clearly contradict.
+3. **Duplicate charges, billing errors, our fault on switch/cancel** — full refund of the erroneous amount. Always.
+
+## Partial refunds (mid-cycle cancellations)
+
+When a customer cancels mid-billing-cycle and asks for a refund of the unused portion:
+
+- **Monthly plans**: pro-rated refund based on days unused. Calculation: `(days_unused / days_in_period) * monthly_charge`. Round to 2 decimals. Process via Stripe `refunds.create` against the most recent charge.
+- **Annual plans**: NO automatic pro-rated refund — annual plans are sold at a discount precisely because the customer commits. We can offer a Stripe credit toward future use within 12 months, but not a cash refund. Exception: if the customer is leaving because of a defect we caused (see "Defective product" above), full pro-rated cash refund.
+
+Day-1 sanity check before processing: Stripe occasionally double-charges if a webhook retried. Look for two charges within 60 seconds of each other on the same customer — if you see that, refund the duplicate first, then evaluate the partial-cycle refund on the remaining real charge.
+
+## Approval thresholds
+
+| Refund amount | Approval needed |
+|---|---|
+| Up to $500 | CS rep can process directly. Log to #refund-log within 1 hour. |
+| $501 – $2,000 | CS lead (Alex Morgan) approval. Slack DM with reason and Stripe charge ID. |
+| $2,001 – $10,000 | CS lead + finance lead (Priyanka Suresh) approval. Both must thumbs-up the request in #refund-approvals. |
+| Over $10,000 | CTO (Marcus Holt) or CEO (Maya Chen) approval. Email, not Slack — we want a paper trail at this size. |
+
+For Enterprise/VIP customers: the always-approved rule overrides this table. CS rep can process any amount on a VIP account directly, but MUST notify the AE in #cs-enterprise within 4 hours so we keep account context.
+
+For amounts > $25,000 (very rare): also notify legal (lawyer@loopline.com — Cassidy James, retained counsel).
+
+## Stripe credit vs actual refund — choose correctly
+
+Two ways to give money back. Picking wrong wastes processor fees or leaves the customer waiting for ACH for a week.
+
+**Stripe credit (preferred when applicable)**: applied to the customer's next invoice via `customerBalance.create`. Use this when:
+- Customer is staying on the platform.
+- Refund is for goodwill or partial period adjustment.
+- Customer is on a recurring plan.
+- Refund is less than 60 days old AND the customer wants to remain a customer.
+
+Stripe credit costs us less (no payment processor fee, no chargeback exposure) and keeps the relationship going.
+
+**Actual refund (Stripe `refunds.create`)**: money goes back to the original payment method. Use this when:
+- Customer is leaving the platform (or already left).
+- Refund is for defective product or our error.
+- Customer explicitly asks for cash back, not credit. (Don't argue — give them what they ask for.)
+- Refund is more than 60 days old. Stripe blocks credits past that window.
+
+For actual refunds: Stripe takes 5–10 business days to settle for cards, longer for ACH and SEPA. Tell the customer this proactively so they don't follow up on day 3.
+
+## Edge cases
+
+**Customer claims they never authorized the charge.** Treat as potentially fraudulent. Pull Stripe logs (IP, user-agent, 3DS status). If clearly the customer's session: process the refund and document. If unclear: escalate to Alex + Priyanka before refunding. Do NOT refund a possible chargeback proactively — we lose the dispute leverage.
+
+**Chargeback already filed by the customer.** Don't refund — let the chargeback process play out. Refunding on top of a chargeback double-pays. Reach out to the customer asking them to drop the chargeback in exchange for a faster direct refund. If they won't drop it, fight it through Stripe Dispute with the evidence pack.
+
+**Customer is angry and threatening to post on Twitter / X / file BBB complaint.** Don't let the threat dictate the refund decision — apply the same policy. But escalate to Alex so we have visibility on potential PR exposure. Maya wants a heads-up on anything that could hit social.
+
+**Customer used >50 GB of data, then asks for refund.** Heavy usage is signal that the product worked. Decline the "defective" pathway. Offer pro-rated mid-cycle refund per partial-refund rules above.
+
+**Annual customer 6 months in, asking for refund because they're switching to a competitor.** Decline cash refund per annual plan rules. Offer a Stripe credit equal to remaining months that they can apply toward future Loopline use within 12 months. Document reason in HubSpot — competitor-loss is product feedback we want.
+
+**Customer charged the wrong card / wants the refund routed to a different card.** Stripe doesn't allow it. Refund to the original method only. If their original card is canceled, Stripe will issue a check/ACH per their fallback. Tell the customer this is Stripe's rule, not ours.
+
+**Refund crosses fiscal-year boundary.** No special handling on our side, but flag Priyanka in #finance — accounting wants the heads-up.
+
+## Logging
+
+Every refund must be logged in #refund-log within 1 hour of processing. Format:
+
+    Customer: <workspace name>
+    Plan: <starter | team | growth | enterprise>
+    Amount: $<amount>
+    Reason: <one of: defective | enterprise-courtesy | mid-cycle | duplicate-charge | goodwill | other>
+    Method: <stripe-credit | stripe-refund>
+    Approved by: <self | alex | alex+priyanka | marcus | maya>
+    Stripe ID: <re_... or cr_...>
+    Notes: <one line if anything's unusual>
+
+We review #refund-log monthly to spot patterns (e.g. recurring "defective" reasons pointing at a real bug, or a single rep approving many borderline cases).
+
+## Quick reference
+
+- 30 days from first paid charge → refundable on request.
+- Enterprise / VIP → yes always, notify AE.
+- Defective → yes always, no questions.
+- Mid-cycle monthly → pro-rated cash refund.
+- Mid-cycle annual → Stripe credit only, not cash.
+- ≤ $500 → CS rep solo.
+- $501–$2,000 → Alex.
+- $2,001–$10,000 → Alex + Priyanka.
+- $10,001+ → Marcus or Maya, by email.
+- Use Stripe credit unless customer is leaving or it's >60 days old.
+- Log to #refund-log within 1 hour.
+
+If you're not sure: ask in #cs-team and someone will reply within 30 min during business hours, faster on weekdays.

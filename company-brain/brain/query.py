@@ -1,4 +1,15 @@
-"""Core RAG query and skills-file generator.
+"""RAG query and workflow/skill-file generators.
+
+Three public entry points and two distinct schemas:
+  - query_brain(question, top_k)            — RAG Q&A over the chunks table
+  - generate_skills_file(name, top_k)       — RAG-driven skill file (chunks → SKILL_SCHEMA)
+  - generate_workflow_from_text(name, body) — text-driven workflow (paste → WORKFLOW_SCHEMA),
+                                              persisted to the skills table for /history
+
+SKILL_SCHEMA (returned by /skills) and WORKFLOW_SCHEMA (returned by /workflows/generate)
+are intentionally different shapes — see the docstring on each near the bottom of
+this file. The workflow path also persists, so its shape has to round-trip through
+the skills table (see brain/store.py and brain/schema.sql).
 
 CLI:
     python -m brain.query "How do we handle refunds?"
@@ -19,7 +30,7 @@ import anthropic
 from dotenv import load_dotenv
 
 from brain.embedder import embed_query
-from brain.store import similarity_search
+from brain.store import save_workflow, similarity_search
 
 load_dotenv()
 
@@ -33,19 +44,94 @@ Be concise but complete. For policies, procedures, or named decisions, prefer di
 
 SKILLS_SYSTEM_PROMPT = """You transform raw company knowledge into structured skill files. Given a process name and a numbered list of knowledge chunks (Slack threads, Notion docs, GitHub issues), produce a JSON skill file describing how the company handles that process.
 
-Rules:
-- Use ONLY information present in the chunks. Do not invent steps, owners, or rules. If the chunks don't say who owns a step, use "unspecified".
-- "steps" must be ordered by execution. Each step has an integer "step", a concrete "action", an "owner" (role or "unspecified"), and "notes" (clarification, edge cases, or empty string).
-- "decision_rules" capture if-this-then-that statements grounded in the chunks (e.g., "If outage breaches SLA, apply automatic credit per contract terms.").
-- "exceptions" list scenarios in the chunks where the default process does not apply.
-- "sources" list the source labels (formatted as "source_type:source_name") for the chunks that materially contributed. Drop chunks you didn't use.
-- If the chunks are insufficient to populate a field, return an empty list for it. Do not fabricate."""
+The output schema:
+- "process": short name for the process.
+- "trigger": short string describing the event that starts this process (e.g., "customer files refund request via support email", "p95 latency alert fires"). If unclear from the chunks, use "manual / on demand".
+- "steps": ordered array. Each step has:
+    - "step": integer position
+    - "action": single imperative sentence describing what is done
+    - "logic": an if/then rule that gates this specific step, or null if unconditional. Example: "If refund amount > $500, route to manager queue before processing." DO NOT confuse this with general decision_rules — logic is per-step.
+    - "owner": role or named person responsible. If the chunks don't say, use "unspecified".
+    - "notes": clarification, edge cases, or context for the step. Use null if there is nothing to add.
+- "decision_rules": process-wide if/then rules (not tied to one step), as plain English strings.
+- "approvals": authorization gates — anything requiring sign-off or escalation ("credits over 1 cycle require CEO approval"). Empty list if none.
+- "exceptions": edge cases and overrides where the default process does not apply.
+- "sources_summary": ONE sentence describing what kinds of sources informed this skill (e.g., "Drawn from #engineering-incidents Slack thread, the Notion on-call runbook, and GitHub issue #1232.").
 
+Rules:
+- Use ONLY information present in the chunks. Do not invent steps, owners, triggers, decision rules, or approvals.
+- Distinguish per-step logic (in step.logic) from process-wide decision_rules. A rule that says "if amount > X, do Y" inside a specific step belongs in that step's logic. A rule like "annual contracts cannot be cash-refunded mid-term" belongs in decision_rules.
+- If the chunks don't have enough information for a list field, return an empty list. For string fields, prefer a clear short summary over a fabricated long one."""
+
+WORKFLOW_SYSTEM_PROMPT = """You transform raw source material (Slack threads, docs, runbooks, meeting notes) into structured workflow files. Given a process name and source material the user has pasted directly, produce a JSON workflow describing how the process actually runs.
+
+Rules:
+- Use ONLY information present in the source material. Do not invent steps, owners, triggers, decision rules, or approvals.
+- "trigger" is a short string describing what kicks off this process (e.g., "customer files refund request via support email", "p95 latency alert fires in #engineering-incidents"). If the source doesn't make this clear, use "manual / on demand".
+- "steps" must be ordered by execution. Each step has an integer "step", a concrete "action" (a single imperative sentence), an "owner" (role or person if specified, otherwise "unspecified"), and "notes" (any conditional or edge-case detail; empty string if none).
+- "decision_rules" capture if-this-then-that statements grounded in the source.
+- "approvals" list authorization gates explicitly mentioned ("CFO sign-off required for credits over 1 cycle"). Empty list if none.
+- "exceptions" list scenarios in the source where the default process does not apply.
+- "sources" list short labels for the inputs that contributed (e.g., "slack:engineering-incidents", "notion:Refund Policy"). If the source doesn't make labels obvious, use "user-pasted material".
+- If the source doesn't contain enough info to populate a list field, return an empty list. Do not fabricate."""
+
+
+# ---------------------------------------------------------------------------
+# SKILL_SCHEMA — returned by /skills (generate_skills_file).
+# ---------------------------------------------------------------------------
+# Per-step logic, single sources_summary string. Distinct from WORKFLOW_SCHEMA
+# below to keep the workflow UI's contract stable while the skill-file shape
+# evolves.
 SKILL_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "process": {"type": "string"},
+        "trigger": {"type": "string"},
+        "steps": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "step": {"type": "integer"},
+                    "action": {"type": "string"},
+                    "logic": {"type": ["string", "null"]},
+                    "owner": {"type": "string"},
+                    "notes": {"type": ["string", "null"]},
+                },
+                "required": ["step", "action", "logic", "owner", "notes"],
+                "additionalProperties": False,
+            },
+        },
+        "decision_rules": {"type": "array", "items": {"type": "string"}},
+        "approvals": {"type": "array", "items": {"type": "string"}},
+        "exceptions": {"type": "array", "items": {"type": "string"}},
+        "sources_summary": {"type": "string"},
+    },
+    "required": [
+        "process",
+        "trigger",
+        "steps",
+        "decision_rules",
+        "approvals",
+        "exceptions",
+        "sources_summary",
+    ],
+    "additionalProperties": False,
+}
+
+
+# ---------------------------------------------------------------------------
+# WORKFLOW_SCHEMA — returned by /workflows/generate (generate_workflow_from_text).
+# ---------------------------------------------------------------------------
+# Has `description` and `sources` (array). This shape is what /history rows
+# and the workflow UI consume — don't change it without updating
+# brain/store.py, brain/schema.sql, and ui/app/page.tsx together.
+WORKFLOW_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "process": {"type": "string"},
         "description": {"type": "string"},
+        "trigger": {"type": "string"},
         "steps": {
             "type": "array",
             "items": {
@@ -61,14 +147,17 @@ SKILL_SCHEMA: dict[str, Any] = {
             },
         },
         "decision_rules": {"type": "array", "items": {"type": "string"}},
+        "approvals": {"type": "array", "items": {"type": "string"}},
         "exceptions": {"type": "array", "items": {"type": "string"}},
         "sources": {"type": "array", "items": {"type": "string"}},
     },
     "required": [
         "process",
         "description",
+        "trigger",
         "steps",
         "decision_rules",
+        "approvals",
         "exceptions",
         "sources",
     ],
@@ -151,11 +240,11 @@ def query_brain(question: str, top_k: int = 6) -> dict[str, Any]:
 
 
 def generate_skills_file(process_name: str, top_k: int = 10) -> dict[str, Any]:
-    """Distill knowledge about a process into a structured skill file.
+    """RAG-driven skill file: read chunks for the process, structure into SKILL_SCHEMA.
 
-    One Voyage embed + one Supabase query + one Claude call. Skips the
-    prose-answer step that query_brain does — Claude reads the raw chunks
-    and structures them into JSON in a single pass.
+    Use generate_workflow_from_text() instead when the user pastes their own
+    source material; that path skips retrieval entirely and produces the
+    workflow shape (description + sources array).
     """
     query_embedding = embed_query(process_name)
     matches = similarity_search(query_embedding, k=top_k)
@@ -163,11 +252,12 @@ def generate_skills_file(process_name: str, top_k: int = 10) -> dict[str, Any]:
     if not matches:
         return {
             "process": process_name,
-            "description": "No information found in the knowledge base for this process.",
+            "trigger": "",
             "steps": [],
             "decision_rules": [],
+            "approvals": [],
             "exceptions": [],
-            "sources": [],
+            "sources_summary": "No information found in the knowledge base for this process.",
         }
 
     context = "\n\n".join(
@@ -200,6 +290,50 @@ def generate_skills_file(process_name: str, top_k: int = 10) -> dict[str, Any]:
 
     text = next((b.text for b in message.content if b.type == "text"), "")
     return json.loads(text)
+
+
+def generate_workflow_from_text(name: str, content: str) -> dict[str, Any]:
+    """Transform user-pasted source material into a structured workflow.
+
+    No retrieval — the user supplies all source material directly. After
+    generation, the workflow is persisted to the skills table so /history
+    can replay it. Persistence failures don't block the response.
+    """
+    user_message = f"Process name: {name}\n\nSource material:\n\n{content}"
+
+    client = anthropic.Anthropic()
+    message = client.messages.create(
+        model=MODEL,
+        max_tokens=4096,
+        system=[
+            {
+                "type": "text",
+                "text": WORKFLOW_SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
+        thinking={"type": "adaptive"},
+        output_config={
+            "effort": "medium",
+            "format": {"type": "json_schema", "schema": WORKFLOW_SCHEMA},
+        },
+        messages=[{"role": "user", "content": user_message}],
+    )
+
+    if message.stop_reason == "refusal":
+        raise RuntimeError("Claude refused to generate the workflow for safety reasons.")
+
+    text = next((b.text for b in message.content if b.type == "text"), "")
+    workflow = json.loads(text)
+
+    try:
+        save_workflow(workflow)
+    except Exception as exc:
+        # Don't block the response on persistence failures — the user still
+        # gets their workflow, /history just won't include this run.
+        print(f"[workflow] save_workflow failed: {exc}", flush=True)
+
+    return workflow
 
 
 def _cli() -> None:
