@@ -292,12 +292,22 @@ def generate_skills_file(process_name: str, top_k: int = 10) -> dict[str, Any]:
     return json.loads(text)
 
 
-def generate_workflow_from_text(name: str, content: str) -> dict[str, Any]:
+def generate_workflow_from_text(
+    name: str,
+    content: str,
+    source: str | None = None,
+    source_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Transform user-pasted source material into a structured workflow.
 
     No retrieval — the user supplies all source material directly. After
     generation, the workflow is persisted to the skills table so /history
     can replay it. Persistence failures don't block the response.
+
+    Optional `source` and `source_metadata` are passed through to the store
+    layer for provenance (e.g. "slack" + channel/thread/user). When the row
+    is saved successfully, its UUID is added to the returned dict as `id`
+    so callers (UI, Slack bot) can build deeplinks.
     """
     user_message = f"Process name: {name}\n\nSource material:\n\n{content}"
 
@@ -326,13 +336,23 @@ def generate_workflow_from_text(name: str, content: str) -> dict[str, Any]:
     text = next((b.text for b in message.content if b.type == "text"), "")
     workflow = json.loads(text)
 
+    workflow_id = ""
     try:
-        save_workflow(workflow)
+        # Persist the raw input alongside the structured output so the
+        # /brain/[id] detail page can offer a "Re-extract" action.
+        workflow_id = save_workflow(
+            workflow,
+            source=source,
+            source_metadata=source_metadata,
+            raw_text=content,
+        )
     except Exception as exc:
         # Don't block the response on persistence failures — the user still
         # gets their workflow, /history just won't include this run.
         print(f"[workflow] save_workflow failed: {exc}", flush=True)
 
+    if workflow_id:
+        workflow["id"] = workflow_id
     return workflow
 
 

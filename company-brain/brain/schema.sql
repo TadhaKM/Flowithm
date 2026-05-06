@@ -8,6 +8,10 @@
 -- Supabase ships pgvector but it is not enabled by default in new projects.
 create extension if not exists vector;
 
+-- pg_trgm powers the fuzzy `similarity()` function used by the Slack bot when
+-- it asks "do we already have a workflow for something close to this name?".
+create extension if not exists pg_trgm;
+
 
 -- ---------------------------------------------------------------------------
 -- chunks
@@ -80,16 +84,52 @@ create table if not exists skills (
     -- Source labels (e.g. "slack:engineering-incidents", "notion:Refund Policy").
     sources         jsonb         not null default '[]'::jsonb,
 
+    -- Where the workflow was created from: "manual" (user pasted), "slack"
+    -- (extracted from a thread by the Slack bot), etc. Free-form text.
+    source          text          not null default 'manual',
+
+    -- Provenance details — channel/thread/triggering user for Slack-sourced
+    -- workflows; empty object for manual ones. Queryable via JSONB operators.
+    source_metadata jsonb         not null default '{}'::jsonb,
+
+    -- "Update existing" archives the previous version rather than deleting,
+    -- so we keep a history of how a process changed over time.
+    archived        boolean       not null default false,
+    archived_at     timestamptz,
+
+    -- Original input text the workflow was distilled from. Preserved so the
+    -- /brain/[id] page can offer a "Re-extract" button that re-runs the
+    -- generation against the same source material.
+    raw_text        text          not null default '',
+
+    -- Set by the /brain UI's "Mark as reviewed" button. Null = unreviewed.
+    reviewed_at     timestamptz,
+
     generated_at    timestamptz   not null default now()
 );
 
 -- Idempotent migrations for installations created before the workflow fields
 -- existed. Safe to re-run; each ALTER is a no-op once the column is in place.
 alter table skills add column if not exists process_trigger text not null default '';
-alter table skills add column if not exists decision_rules jsonb not null default '[]'::jsonb;
-alter table skills add column if not exists approvals      jsonb not null default '[]'::jsonb;
-alter table skills add column if not exists exceptions     jsonb not null default '[]'::jsonb;
+alter table skills add column if not exists decision_rules  jsonb not null default '[]'::jsonb;
+alter table skills add column if not exists approvals       jsonb not null default '[]'::jsonb;
+alter table skills add column if not exists exceptions      jsonb not null default '[]'::jsonb;
+alter table skills add column if not exists source          text  not null default 'manual';
+alter table skills add column if not exists source_metadata jsonb not null default '{}'::jsonb;
+alter table skills add column if not exists archived        boolean not null default false;
+alter table skills add column if not exists archived_at     timestamptz;
+alter table skills add column if not exists raw_text        text not null default '';
+alter table skills add column if not exists reviewed_at     timestamptz;
 alter table skills alter column description set default '';
+
+-- GIN trigram index makes similarity(process_name, ?) searches cheap.
+-- Used by the find_similar_workflow RPC below (Slack bot's "Update existing"
+-- detection). Optional — without it queries still work, just slower at scale.
+create index if not exists skills_process_name_trgm_idx
+    on skills
+    using gin (process_name gin_trgm_ops);
+
+create index if not exists skills_archived_idx on skills (archived);
 
 
 -- ---------------------------------------------------------------------------
@@ -159,4 +199,64 @@ as $$
     where c.embedding is not null
     order by c.embedding <=> query_embedding
     limit match_count;
+$$;
+
+
+-- ---------------------------------------------------------------------------
+-- find_similar_workflow(q_name, min_sim, exclude_id)
+-- ---------------------------------------------------------------------------
+-- Returns the most-similar non-archived workflow whose process_name has
+-- trigram similarity >= min_sim with q_name. Used by the Slack bot to detect
+-- when a freshly-extracted workflow likely supersedes an existing one
+-- ("Update existing" button).
+--
+-- min_sim of 0.4 catches "Customer refund handling" matching "Refund flow"
+-- without overmatching unrelated phrases. Tune empirically.
+create or replace function find_similar_workflow(
+    q_name      text,
+    min_sim     float default 0.4,
+    exclude_id  text  default ''
+)
+returns table (
+    id              uuid,
+    process_name    text,
+    description     text,
+    process_trigger text,
+    steps           jsonb,
+    decision_rules  jsonb,
+    approvals       jsonb,
+    exceptions      jsonb,
+    sources         jsonb,
+    source          text,
+    source_metadata jsonb,
+    archived        boolean,
+    archived_at     timestamptz,
+    generated_at    timestamptz,
+    similarity      float
+)
+language sql
+stable
+as $$
+    select
+        s.id,
+        s.process_name,
+        s.description,
+        s.process_trigger,
+        s.steps,
+        s.decision_rules,
+        s.approvals,
+        s.exceptions,
+        s.sources,
+        s.source,
+        s.source_metadata,
+        s.archived,
+        s.archived_at,
+        s.generated_at,
+        similarity(s.process_name, q_name) as similarity
+    from skills s
+    where s.archived = false
+      and (exclude_id = '' or s.id::text <> exclude_id)
+      and similarity(s.process_name, q_name) >= min_sim
+    order by similarity(s.process_name, q_name) desc
+    limit 1;
 $$;

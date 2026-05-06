@@ -1,0 +1,6 @@
+slack-bolt
+python-dotenv
+supabase
+anthropic
+requests
+tiktoken

@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -51,10 +52,20 @@ export default function Home() {
   const [copied, setCopied] = useState(false);
   const [history, setHistory] = useState<Workflow[]>([]);
   const [chipLoading, setChipLoading] = useState<string | null>(null);
+  const [clearingHistory, setClearingHistory] = useState(false);
+  const [clearConfirm, setClearConfirm] = useState(false);
 
   useEffect(() => {
     fetchHistory();
   }, []);
+
+  // Clear-confirm reset: first click arms the button; if no second click
+  // within 2 seconds, it reverts to its idle label.
+  useEffect(() => {
+    if (!clearConfirm) return;
+    const t = setTimeout(() => setClearConfirm(false), 2000);
+    return () => clearTimeout(t);
+  }, [clearConfirm]);
 
   async function fetchHistory() {
     try {
@@ -107,6 +118,26 @@ export default function Home() {
     }
   }
 
+  async function clearHistory() {
+    if (clearingHistory) return;
+    if (!clearConfirm) {
+      // Arm the button — second click within 2s actually clears.
+      setClearConfirm(true);
+      return;
+    }
+    setClearConfirm(false);
+    setClearingHistory(true);
+    try {
+      const res = await fetch(`${API_URL}/history`, { method: "DELETE" });
+      if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
+      setHistory([]);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setClearingHistory(false);
+    }
+  }
+
   async function copyJson() {
     if (!workflow) return;
     try {
@@ -123,9 +154,17 @@ export default function Home() {
       <div className="max-w-6xl mx-auto px-6 py-8">
         <header className="mb-12">
           <div className="flex items-center justify-between gap-4">
-            <h1 className="text-base font-medium tracking-tight text-zinc-100">
-              Flowithm
-            </h1>
+            <div className="flex items-center gap-6">
+              <h1 className="text-base font-medium tracking-tight text-zinc-100">
+                Flowithm
+              </h1>
+              <Link
+                href="/brain"
+                className="text-sm text-zinc-400 hover:text-zinc-100 transition-colors"
+              >
+                Knowledge base
+              </Link>
+            </div>
             <p className="text-sm text-zinc-400 hidden sm:block">
               Turn company knowledge into systems AI can run
             </p>
@@ -224,9 +263,26 @@ export default function Home() {
 
         {history.length > 0 && (
           <section className="mt-14">
-            <h3 className="text-xs uppercase tracking-wider text-zinc-500 font-medium mb-3">
-              Recent workflows
-            </h3>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-xs uppercase tracking-wider text-zinc-500 font-medium">
+                Recent workflows
+              </h3>
+              <button
+                onClick={clearHistory}
+                disabled={clearingHistory}
+                className={`text-xs transition-colors disabled:opacity-50 ${
+                  clearConfirm
+                    ? "text-amber-300 hover:text-amber-200"
+                    : "text-zinc-500 hover:text-zinc-300"
+                }`}
+              >
+                {clearingHistory
+                  ? "Clearing…"
+                  : clearConfirm
+                    ? "Click again to confirm"
+                    : "Clear all"}
+              </button>
+            </div>
             <div className="flex gap-3 overflow-x-auto pb-2 scrollbar-thin">
               {history.map((wf, i) => (
                 <button

@@ -1,12 +1,16 @@
 """FastAPI backend for Company Brain.
 
 Endpoints:
-  POST /query              — RAG Q&A
-  POST /skills             — RAG-based skill file
-  POST /workflows/generate — text-based workflow generation (paste material)
-  GET  /history            — last N generated workflows
-  GET  /demo/{slug}        — serve a demo source-material file from /demo-data
-  GET  /health             — status + indexed chunk count
+  POST   /query                       — RAG Q&A
+  POST   /skills                      — RAG-based skill file
+  POST   /workflows/generate          — text-based workflow generation (paste material)
+  GET    /workflows/similar           — fuzzy-name lookup for "update existing" detection
+  GET    /workflows/{id}              — fetch a single workflow by id (UI deeplink + Slack)
+  POST   /workflows/{id}/archive      — mark a workflow archived
+  GET    /history                     — last N generated workflows
+  DELETE /history                     — wipe all generated workflows
+  GET    /demo/{slug}                 — serve a demo source-material file from /demo-data
+  GET    /health                      — status + indexed chunk count
 """
 # When uvicorn loads this as `main:app` (via run.sh, with /api as the working
 # directory) instead of `api.main:app` from the project root, the `brain.*`
@@ -32,7 +36,14 @@ from brain.query import (
     generate_workflow_from_text,
     query_brain,
 )
-from brain.store import count_chunks, list_workflows
+from brain.store import (
+    archive_workflow,
+    clear_workflows,
+    count_chunks,
+    find_similar_workflow,
+    get_workflow,
+    list_workflows,
+)
 
 load_dotenv()
 
@@ -63,6 +74,9 @@ class SkillsRequest(BaseModel):
 class WorkflowRequest(BaseModel):
     name: str
     content: str
+    # Optional provenance — used by the Slack bot to record channel/thread.
+    source: str | None = None
+    source_metadata: dict | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -118,12 +132,58 @@ def skills(req: SkillsRequest):
 
 @app.post("/workflows/generate")
 def generate_workflow(req: WorkflowRequest) -> dict:
-    return generate_workflow_from_text(req.name, req.content)
+    return generate_workflow_from_text(
+        req.name,
+        req.content,
+        source=req.source,
+        source_metadata=req.source_metadata,
+    )
+
+
+# IMPORTANT: declare /workflows/similar BEFORE /workflows/{id}, otherwise
+# FastAPI greedily matches "similar" as the {id} path segment.
+@app.get("/workflows/similar")
+def workflow_similar(
+    name: str,
+    threshold: float = 0.4,
+    exclude_id: str = "",
+) -> dict | None:
+    """Fuzzy-match an existing non-archived workflow by name. Returns null if none."""
+    return find_similar_workflow(
+        name=name,
+        threshold=threshold,
+        exclude_id=exclude_id or None,
+    )
+
+
+@app.get("/workflows/{workflow_id}")
+def get_workflow_endpoint(workflow_id: str) -> dict:
+    """Fetch a single workflow row by id — UI deeplink and Slack-bot re-fetch."""
+    wf = get_workflow(workflow_id)
+    if not wf:
+        raise HTTPException(404, f"workflow not found: {workflow_id}")
+    return wf
+
+
+@app.post("/workflows/{workflow_id}/archive")
+def archive_workflow_endpoint(workflow_id: str) -> dict:
+    """Mark a workflow archived. Used by the Slack bot's Update existing flow."""
+    ok = archive_workflow(workflow_id)
+    if not ok:
+        raise HTTPException(404, f"workflow not found: {workflow_id}")
+    return {"status": "ok", "archived": workflow_id}
 
 
 @app.get("/history")
 def history(limit: int = 5) -> list[dict]:
     return list_workflows(limit=limit)
+
+
+@app.delete("/history")
+def clear_history() -> dict:
+    """Wipe all rows from the skills table — backs the UI's Clear all button."""
+    cleared = clear_workflows()
+    return {"status": "ok", "cleared": cleared}
 
 
 @app.get("/demo/{slug}", response_class=PlainTextResponse)
