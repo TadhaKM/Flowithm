@@ -36,8 +36,8 @@ from slack.formatter import (
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-FLOWBRAIN_URL = os.environ.get("FLOWBRAIN_URL", "http://localhost:3000").rstrip("/")
-FLOWBRAIN_API_URL = os.environ.get("FLOWBRAIN_API_URL", "http://localhost:8000").rstrip("/")
+FLOWITHM_URL = os.environ.get("FLOWITHM_URL", "http://localhost:3000").rstrip("/")
+FLOWITHM_API_URL = os.environ.get("FLOWITHM_API_URL", "http://localhost:8000").rstrip("/")
 
 MIN_WORDS = 20
 THREAD_WAIT_SECONDS = 60
@@ -77,7 +77,9 @@ TRIGGER_REGEX = re.compile("|".join(TRIGGER_PATTERNS), re.IGNORECASE)
 # Slack message links to Notion/Google Doc pages — we surface these in the
 # pasted thread material so Claude can reference them.
 DOC_URL_REGEX = re.compile(
-    r"https?://(?:www\.)?(?:notion\.so|notion\.site|docs\.google\.com)/[^\s>|]+",
+    # Matches notion.so / notion.site / docs.google.com — with or without a
+    # subdomain (real Notion shared URLs are <workspace>.notion.site).
+    r"https?://(?:[\w-]+\.)?(?:notion\.so|notion\.site|docs\.google\.com)/[^\s>|]+",
     re.IGNORECASE,
 )
 
@@ -316,7 +318,7 @@ def _extract_workflow_async(
         _show_error(
             client, channel_id, message_ts,
             "Couldn't read the thread. Please try again or paste it manually at "
-            f"{FLOWBRAIN_URL}.",
+            f"{FLOWITHM_URL}.",
         )
         return
 
@@ -342,11 +344,11 @@ def _extract_workflow_async(
         _show_error(
             client, channel_id, message_ts,
             "Couldn't extract a workflow from this thread. The thread may be too short "
-            f"or too ambiguous. Try again or paste it manually at {FLOWBRAIN_URL}.",
+            f"or too ambiguous. Try again or paste it manually at {FLOWITHM_URL}.",
         )
         return
 
-    # 5) Call FlowBrain to generate + persist
+    # 5) Call Flowithm to generate + persist
     save_failed = False
     workflow: dict[str, Any] | None = None
     source_metadata = {
@@ -359,7 +361,7 @@ def _extract_workflow_async(
     }
     try:
         resp = requests.post(
-            f"{FLOWBRAIN_API_URL}/workflows/generate",
+            f"{FLOWITHM_API_URL}/workflows/generate",
             json={
                 "name": process_name,
                 "content": thread_text,
@@ -375,7 +377,7 @@ def _extract_workflow_async(
         _show_error(
             client, channel_id, message_ts,
             "Couldn't extract a workflow from this thread. The thread may be too short "
-            f"or too ambiguous. Try again or paste it manually at {FLOWBRAIN_URL}.",
+            f"or too ambiguous. Try again or paste it manually at {FLOWITHM_URL}.",
         )
         return
 
@@ -389,7 +391,7 @@ def _extract_workflow_async(
     if workflow_id:
         try:
             sim = requests.get(
-                f"{FLOWBRAIN_API_URL}/workflows/similar",
+                f"{FLOWITHM_API_URL}/workflows/similar",
                 params={"name": process_name, "exclude_id": workflow_id},
                 timeout=10,
             )
@@ -399,7 +401,7 @@ def _extract_workflow_async(
             print(f"[extract] similar lookup failed: {exc}", flush=True)
 
     # 7) Build deeplink
-    deeplink = f"{FLOWBRAIN_URL}/workflow/{workflow_id}" if workflow_id else FLOWBRAIN_URL
+    deeplink = f"{FLOWITHM_URL}/workflow/{workflow_id}" if workflow_id else FLOWITHM_URL
 
     # 8) Render rich response
     try:
@@ -486,7 +488,7 @@ def _perform_update(
     # Archive the existing
     try:
         resp = requests.post(
-            f"{FLOWBRAIN_API_URL}/workflows/{existing_id}/archive",
+            f"{FLOWITHM_API_URL}/workflows/{existing_id}/archive",
             timeout=10,
         )
         resp.raise_for_status()
@@ -503,7 +505,7 @@ def _perform_update(
     meta = workflow.get("source_metadata") or {}
     channel_name = meta.get("channel_name", "channel")
     message_count = meta.get("message_count", 0)
-    deeplink = f"{FLOWBRAIN_URL}/workflow/{new_id}"
+    deeplink = f"{FLOWITHM_URL}/workflow/{new_id}"
 
     try:
         client.chat_update(
@@ -535,7 +537,7 @@ def _revert_to_workflow(
     meta = workflow.get("source_metadata") or {}
     channel_name = meta.get("channel_name", "channel")
     message_count = meta.get("message_count", 0)
-    deeplink = f"{FLOWBRAIN_URL}/workflow/{workflow_id}"
+    deeplink = f"{FLOWITHM_URL}/workflow/{workflow_id}"
     try:
         client.chat_update(
             channel=channel_id,
@@ -572,7 +574,7 @@ def _fetch_workflow(workflow_id: str) -> dict[str, Any] | None:
     if not workflow_id:
         return None
     try:
-        resp = requests.get(f"{FLOWBRAIN_API_URL}/workflows/{workflow_id}", timeout=10)
+        resp = requests.get(f"{FLOWITHM_API_URL}/workflows/{workflow_id}", timeout=10)
         resp.raise_for_status()
         return resp.json()
     except Exception as exc:

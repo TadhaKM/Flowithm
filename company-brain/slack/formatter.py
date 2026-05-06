@@ -62,7 +62,7 @@ def build_confirmation_blocks(trigger_text: str, action_value: str) -> list[dict
 
 
 # ---------------------------------------------------------------------------
-# Loading state — shown while we call Claude / FlowBrain.
+# Loading state — shown while we call Claude / Flowithm.
 # ---------------------------------------------------------------------------
 def build_loading_blocks(text: str) -> list[dict]:
     return [

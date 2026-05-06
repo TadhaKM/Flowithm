@@ -6,3 +6,7 @@ uvicorn
 pypdf2
 python-dotenv
 tiktoken
+
+# dev — testing
+pytest
+httpx

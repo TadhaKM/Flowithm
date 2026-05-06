@@ -88,11 +88,11 @@ Set these in `.env` at the repo root (see [`.env.example`](../.env.example)):
 SLACK_BOT_TOKEN=xoxb-...
 SLACK_SIGNING_SECRET=...
 SLACK_APP_TOKEN=xapp-...
-FLOWBRAIN_URL=http://localhost:3000      # where the UI lives — used in deeplinks
-FLOWBRAIN_API_URL=http://localhost:8000  # where the bot POSTs /workflows/generate
+FLOWITHM_URL=http://localhost:3000      # where the UI lives — used in deeplinks
+FLOWITHM_API_URL=http://localhost:8000  # where the bot POSTs /workflows/generate
 ```
 
-In production both `FLOWBRAIN_URL` and `FLOWBRAIN_API_URL` typically point to the same host (different ports or paths).
+In production both `FLOWITHM_URL` and `FLOWITHM_API_URL` typically point to the same host (different ports or paths).
 
 ### 9. Install dependencies
 
