@@ -166,12 +166,20 @@ async def lifespan(app: FastAPI):
             pass
 
 
-app = FastAPI(title="Company Brain API", lifespan=lifespan)
+app = FastAPI(title="Flowithm API", lifespan=lifespan)
 
-# Permissive CORS for local dev. Tighten allow_origins before deploying.
+# CORS. Always allow localhost:3000 for local dev; production deploys add
+# their dashboard origin via FRONTEND_URL. allow_credentials=True needs an
+# explicit origin list (the wildcard "*" is invalid with credentials), so
+# we filter empties.
+_origins = [
+    "http://localhost:3000",
+    os.environ.get("FRONTEND_URL", "").strip(),
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[o for o in _origins if o],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )

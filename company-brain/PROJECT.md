@@ -52,6 +52,10 @@ company-brain/
 ├── demo-data/       Sample source material for the offline demo path
 ├── PROJECT.md       This file
 ├── README.md        Setup + usage walkthrough
+├── DEPLOYMENT.md    Railway + Vercel + Supabase deploy guide
+├── Dockerfile       FastAPI image (Railway)
+├── railway.json     Railway build + healthcheck config
+├── ui/vercel.json   Vercel project config
 ├── requirements.txt
 └── .env.example
 ```
@@ -298,6 +302,7 @@ proxy times round-trip itself).
 | `LOG_LEVEL` | `INFO` | Min level for `brain/logger.get_logger` loggers (DEBUG / INFO / WARNING / ERROR). |
 | `ANTHROPIC_TIMEOUT_SECONDS` | `60` | Per-call timeout for `brain/anthropic_client.messages_create`. Bump if generate_workflow_from_text runs long with adaptive thinking. |
 | `APP_VERSION` | `dev` | Surfaced by `GET /health` so probes can confirm which build is running. Set this in the deploy pipeline. |
+| `FRONTEND_URL` | _(empty)_ | Public dashboard origin. Added to FastAPI's CORS allow-list alongside `http://localhost:3000`. Required in production. |
 
 ### `ui/.env.local` (Next.js side)
 
@@ -361,6 +366,7 @@ authoritative; full message bodies via `git show <hash>`.
 | `1febad9` | Structured JSON logger (`brain/logger.py`) + global FastAPI exception handlers; `print()` calls in scheduler / drift / embedder / staleness / query / api replaced with structured logs (commit 1 of 3) |
 | `3540708` | Anthropic retry wrapper + circuit breaker (`brain/anthropic_client.py`); every direct `messages.create` call swapped to `messages_create()` (commit 2 of 3) |
 | `3835def` | Real `/health` probe (Supabase + Anthropic + Voyage + scheduler + circuit-breaker checks) + `APP_VERSION` env (commit 3 of 3) |
+| _(next)_ | Production deployment: Dockerfile + railway.json + ui/vercel.json + .dockerignore + DEPLOYMENT.md + CORS lockdown via `FRONTEND_URL` |
 
 ---
 

@@ -1,0 +1,39 @@
+# Build hygiene + secret containment. Anything that shouldn't ship in the
+# container image goes here. The .env entries are belt-and-braces — Railway
+# injects env vars via dashboard, not via .env files in the image.
+
+# Python
+__pycache__
+*.py[cod]
+*.egg-info
+.venv
+venv
+.pytest_cache
+
+# Secrets / local config
+.env
+.env.local
+.env.*.local
+gmail_token.json
+client_secret.json
+
+# Tests + dev tooling
+tests
+pytest.ini
+
+# Frontend — built and deployed to Vercel separately.
+ui
+
+# CLI / one-shot demo material — not needed at runtime.
+demo-data
+graphify-out
+
+# Source control + editors
+.git
+.gitignore
+.vscode
+.idea
+
+# OS
+.DS_Store
+Thumbs.db
