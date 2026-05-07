@@ -11,14 +11,14 @@ Public surface:
 """
 from __future__ import annotations
 
-import logging
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from brain.logger import get_logger
 from brain.store import get_client
 
-logger = logging.getLogger("flowithm.staleness")
+logger = get_logger("flowithm.staleness")
 
 
 def _stale_days() -> int:
@@ -90,7 +90,9 @@ def run_staleness_check(org_id: str | None = None) -> dict[str, Any]:
                 "stale_flagged_at": _now_utc().isoformat(),
             }).eq("id", skill["id"]).execute()
             flagged += 1
-            logger.info("Flagged stale skill: %s — %s", skill.get("process_name"), reason)
+            logger.info("flagged stale skill", extra={
+                "process": skill.get("process_name"), "reason": reason,
+            })
         elif (not should_flag) and currently_flagged:
             client.table("skills").update({
                 "needs_review": False,
@@ -105,15 +107,12 @@ def run_staleness_check(org_id: str | None = None) -> dict[str, Any]:
         "flags_cleared": cleared,
         "threshold_days": threshold_days,
     }
-    logger.info(
-        "Staleness check complete: %s flagged, %s cleared, %s checked (>%sd)",
-        flagged, cleared, len(skills), threshold_days,
-    )
-    print(
-        f"[Flowithm staleness] {flagged} flagged, {cleared} cleared, "
-        f"{len(skills)} checked (>{threshold_days}d)",
-        flush=True,
-    )
+    logger.info("staleness check complete", extra={
+        "flagged": flagged,
+        "cleared": cleared,
+        "checked": len(skills),
+        "threshold_days": threshold_days,
+    })
     return summary
 
 

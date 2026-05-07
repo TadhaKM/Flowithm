@@ -19,8 +19,11 @@ from dotenv import load_dotenv
 from supabase import Client, create_client
 
 from brain.ingestors import Chunk
+from brain.logger import get_logger
 
 load_dotenv()
+
+log = get_logger("flowithm.embedder")
 
 MODEL = "voyage-3"
 TABLE = "chunks"
@@ -103,7 +106,7 @@ def get_embeddings_batch(
             # doesn't sink the whole batch.
             vectors = [get_embedding(t) for t in batch]
         out.extend(vectors)
-        print(f"Embedding {len(out)}/{total}...")
+        log.info("embedding progress", extra={"done": len(out), "total": total})
 
     return out
 
@@ -167,7 +170,7 @@ def embed_and_store(chunk: Chunk, org_id: str | None = None) -> str | None:
     """
     content_hash = hashlib.sha256(chunk.content.encode("utf-8")).hexdigest()
     if chunk_exists(content_hash):
-        print(f"[embedder] Skipping duplicate chunk: {chunk.source_name}")
+        log.info("skipped duplicate chunk", extra={"source_name": chunk.source_name})
         return None
     embedding = get_embedding(chunk.content)
     return store_chunk(chunk, embedding, org_id=org_id)

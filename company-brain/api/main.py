@@ -28,11 +28,16 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 
+from brain.logger import get_logger
 from brain.store import DEFAULT_ORG_ID
+
+log = get_logger("flowithm.api")
+DOCS_URL = "https://flowithm.io/docs"
 
 from brain.drift import (
     get_conflict_history,
@@ -142,7 +147,7 @@ class SkillFileResponse(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     count = _cached_chunk_count()
-    print(f"[Flowithm API] startup — {count} chunks indexed", flush=True)
+    log.info("api startup", extra={"chunks_indexed": count})
     # Best-effort scheduler boot. If APScheduler / Supabase aren't available
     # we still serve traffic — the manual /ingest/trigger path will report
     # the error too if the user tries to use it.
@@ -150,7 +155,7 @@ async def lifespan(app: FastAPI):
         from brain.scheduler import scheduler
         scheduler.start()
     except Exception as exc:
-        print(f"[Flowithm API] scheduler failed to start: {exc}", flush=True)
+        log.error("scheduler failed to start", exc_info=True, extra={"error": str(exc)})
     try:
         yield
     finally:
@@ -176,6 +181,112 @@ app.add_middleware(
 from api.agent import agent_app  # noqa: E402
 
 app.mount("/api/v1", agent_app)
+
+
+# ---------------------------------------------------------------------------
+# Global exception handlers — every error returns the standard
+# {error, code, docs} envelope. Tracebacks land in the structured logger
+# (never in the response body).
+# ---------------------------------------------------------------------------
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error_handler(request: Request, exc: RequestValidationError):
+    log.warning("request validation failed", extra={
+        "endpoint": request.url.path,
+        "errors": exc.errors(),
+    })
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": "Invalid request",
+            "code": "INVALID_REQUEST",
+            "docs": DOCS_URL,
+            "details": exc.errors(),
+        },
+    )
+
+
+@app.exception_handler(HTTPException)
+async def _http_exception_handler(request: Request, exc: HTTPException):
+    """Force every HTTPException into the {error, code, docs} envelope.
+    HTTPException raises with detail as either a string (legacy callers
+    using `raise HTTPException(404, "msg")`) or a dict (the structured
+    {error, code, docs} envelope). Unwrap both consistently."""
+    detail = exc.detail
+    if isinstance(detail, dict) and "error" in detail and "code" in detail:
+        body = detail
+    else:
+        body = {
+            "error": str(detail) if detail else "Error",
+            "code": _code_for_status(exc.status_code),
+            "docs": DOCS_URL,
+        }
+    return JSONResponse(status_code=exc.status_code, content=body, headers=getattr(exc, "headers", None))
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception):
+    """Last resort — anything that escapes the routing layer ends up here.
+    Map a few well-known Supabase / Postgres errors to clearer responses
+    so the client gets a recognisable code rather than a generic 500."""
+    mapped = _map_supabase_error(exc)
+    if mapped is not None:
+        status, code, message = mapped
+        log.warning("supabase error mapped", extra={
+            "endpoint": request.url.path, "code": code, "status": status,
+            "supabase_error": str(exc),
+        })
+        return JSONResponse(
+            status_code=status,
+            content={"error": message, "code": code, "docs": DOCS_URL},
+        )
+
+    log.error("unhandled exception", exc_info=True, extra={
+        "endpoint": request.url.path, "method": request.method,
+    })
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "Internal server error",
+            "code": "INTERNAL_ERROR",
+            "docs": DOCS_URL,
+        },
+    )
+
+
+def _code_for_status(status: int) -> str:
+    return {
+        400: "INVALID_REQUEST",
+        401: "MISSING_API_KEY",
+        403: "FORBIDDEN",
+        404: "NOT_FOUND",
+        422: "INVALID_REQUEST",
+        429: "RATE_LIMIT_EXCEEDED",
+        500: "INTERNAL_ERROR",
+    }.get(status, "INTERNAL_ERROR")
+
+
+def _map_supabase_error(exc: Exception) -> tuple[int, str, str] | None:
+    """Recognise common postgrest.APIError shapes and map to (status, code, message).
+    Returns None for unknown errors (caller falls through to a generic 500)."""
+    code = getattr(exc, "code", None) or ""
+    message = getattr(exc, "message", None) or str(exc)
+    # SQLSTATE codes — values supabase-py surfaces directly on APIError.code
+    if code == "23505":
+        return 409, "ALREADY_EXISTS", "A row with this value already exists."
+    if code == "42P01":
+        return 500, "SCHEMA_OUT_OF_DATE", (
+            "Schema may need migration — re-run brain/schema.sql."
+        )
+    if code == "42501":
+        return 403, "FORBIDDEN", "Database access denied (RLS policy)."
+    if code == "23503":
+        return 400, "INVALID_REQUEST", "Foreign key violation: referenced row missing."
+    # Network-y errors raised by httpx during Supabase calls
+    name = type(exc).__name__
+    if name in {"ConnectError", "ReadTimeout", "ConnectTimeout", "TimeoutException"}:
+        return 503, "DATABASE_UNAVAILABLE", "Database temporarily unavailable; retry shortly."
+    return None
 
 
 @app.post("/query")

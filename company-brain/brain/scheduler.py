@@ -13,7 +13,6 @@ scheduled cadence.
 """
 from __future__ import annotations
 
-import logging
 import os
 import socket
 import threading
@@ -23,7 +22,9 @@ from typing import Any
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
-logger = logging.getLogger("flowithm.scheduler")
+from brain.logger import get_logger
+
+logger = get_logger("flowithm.scheduler")
 
 
 def _now_utc() -> datetime:
@@ -59,8 +60,7 @@ class IngestionScheduler:
         )
         self.scheduler.start()
         self._started = True
-        logger.info("Scheduler started — ingestion every %sh", hours)
-        print(f"[Flowithm scheduler] every {hours}h", flush=True)
+        logger.info("scheduler started", extra={"interval_hours": hours})
 
     def stop(self) -> None:
         if not self._started:
@@ -68,7 +68,7 @@ class IngestionScheduler:
         try:
             self.scheduler.shutdown(wait=False)
         except Exception as exc:
-            logger.warning("Scheduler shutdown raised: %s", exc)
+            logger.warning("scheduler shutdown raised", extra={"error": str(exc)})
         self._started = False
 
     def schedule_hours(self) -> int:
@@ -124,14 +124,13 @@ class IngestionScheduler:
             resp = client.rpc("try_acquire_ingest_lock", {"holder": holder}).execute()
             acquired = bool(resp.data)
         except Exception as exc:
-            print(f"[Flowithm scheduler] lock RPC unavailable, running unlocked: {exc}", flush=True)
+            logger.warning("lock RPC unavailable, running unlocked",
+                           extra={"error": str(exc)})
             lock_supported = False
 
         if not acquired:
-            print(
-                "[Flowithm scheduler] Skipping ingest — lock held by another worker",
-                flush=True,
-            )
+            logger.info("ingest skipped — lock held by another worker",
+                        extra={"holder": holder})
             return None
 
         started_at = _now_utc()
@@ -147,13 +146,13 @@ class IngestionScheduler:
         # instead of per-source — saves Claude calls and surfaces conflicts
         # across the whole sync at once).
         newly_embedded: list = []
-        print(f"[Flowithm scheduler] cycle start {started_at.isoformat()}", flush=True)
+        logger.info("ingest cycle start", extra={"started_at": started_at.isoformat()})
 
         try:
             all_sources = list_active_connected_sources()  # cross-org
         except Exception as exc:
             err = f"failed to load connected_sources: {exc}"
-            logger.error(err)
+            logger.error(err, exc_info=True)
             results["errors"].append(err)
             all_sources = []
 
@@ -194,11 +193,11 @@ class IngestionScheduler:
                     update_source_last_synced(str(source["id"]), _now_utc().isoformat())
                 except NotImplementedError as exc:
                     msg = f"{source['source_type']} source {source['id']}: {exc}"
-                    logger.warning(msg)
+                    logger.warning(msg, extra={"org_id": org_id, "source_id": source.get("id")})
                     org_results["errors"].append(msg)
                 except Exception as exc:
                     msg = f"{source['source_type']} source {source['id']}: {exc}"
-                    logger.exception(msg)
+                    logger.exception(msg, extra={"org_id": org_id, "source_id": source.get("id")})
                     org_results["errors"].append(msg)
 
             # Drift on this org's newly-embedded chunks.
@@ -208,7 +207,7 @@ class IngestionScheduler:
                     org_results["new_conflicts"] = len(conflicts)
                 except Exception as exc:
                     msg = f"check_chunks_against_skills: {exc}"
-                    logger.error(msg)
+                    logger.error(msg, exc_info=True, extra={"org_id": org_id})
                     org_results["errors"].append(msg)
 
             # Staleness pass per-org.
@@ -222,7 +221,7 @@ class IngestionScheduler:
                 org_stale_cleared = stale.get("flags_cleared", 0)
             except Exception as exc:
                 msg = f"run_staleness_check: {exc}"
-                logger.error(msg)
+                logger.error(msg, exc_info=True, extra={"org_id": org_id})
                 org_results["errors"].append(msg)
 
             # Per-org ingest_runs row.
@@ -235,7 +234,8 @@ class IngestionScheduler:
                     "duration_seconds": max(0, int((_now_utc() - started_at).total_seconds())),
                 }, org_id=org_id)
             except Exception as exc:
-                logger.error("ingest_runs insert failed for %s: %s", org_id, exc)
+                logger.error("ingest_runs insert failed",
+                             exc_info=True, extra={"org_id": org_id})
 
             # Aggregate into the cross-org summary kept in memory for /ingest/status.
             results["sources_checked"] += org_results["sources_checked"]
@@ -259,24 +259,15 @@ class IngestionScheduler:
             try:
                 client.rpc("release_ingest_lock").execute()
             except Exception as exc:
-                logger.warning("release_ingest_lock failed: %s", exc)
+                logger.warning("release_ingest_lock failed", extra={"error": str(exc)})
 
-        logger.info(
-            "Scheduled ingest complete: %s new chunks, %s skipped, %s conflicts, %s errors — %ss",
-            results["new_chunks"],
-            results["skipped_chunks"],
-            results["new_conflicts"],
-            len(results["errors"]),
-            duration_seconds,
-        )
-        print(
-            f"[Flowithm scheduler] cycle done — "
-            f"{results['new_chunks']} new, "
-            f"{results['skipped_chunks']} skipped, "
-            f"{len(results['errors'])} errors, "
-            f"{duration_seconds}s",
-            flush=True,
-        )
+        logger.info("ingest cycle complete", extra={
+            "new_chunks": results["new_chunks"],
+            "skipped_chunks": results["skipped_chunks"],
+            "new_conflicts": results["new_conflicts"],
+            "errors": len(results["errors"]),
+            "duration_ms": duration_seconds * 1000,
+        })
         return summary
 
     @staticmethod

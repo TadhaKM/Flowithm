@@ -6,6 +6,7 @@ def test_brain_modules_import():
     import brain.drift  # noqa: F401
     import brain.embedder  # noqa: F401
     import brain.ingestors  # noqa: F401
+    import brain.logger  # noqa: F401
     import brain.query  # noqa: F401
     import brain.staleness  # noqa: F401
     import brain.store  # noqa: F401

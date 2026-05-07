@@ -30,9 +30,12 @@ import anthropic
 from dotenv import load_dotenv
 
 from brain.embedder import embed_query
+from brain.logger import get_logger
 from brain.store import save_workflow, similarity_search
 
 load_dotenv()
+
+log = get_logger("flowithm.query")
 
 MODEL = "claude-sonnet-4-6"
 
@@ -354,7 +357,7 @@ def generate_workflow_from_text(
             org_id=org_id,
         )
     except Exception as exc:
-        print(f"[workflow] save_workflow failed: {exc}", flush=True)
+        log.error("save_workflow failed", exc_info=True, extra={"error": str(exc)})
 
     if workflow_id:
         workflow["id"] = workflow_id
@@ -367,13 +370,13 @@ def generate_workflow_from_text(
                 vec = get_embedding(summary_text)
                 update_skill_summary_embedding(workflow_id, vec, org_id=org_id)
         except Exception as exc:
-            print(f"[workflow] summary embedding failed: {exc}", flush=True)
+            log.error("summary embedding failed", exc_info=True, extra={"error": str(exc)})
 
         try:
             from brain.drift import schedule_drift_check
             schedule_drift_check(content, workflow, org_id=org_id)
         except Exception as exc:
-            print(f"[workflow] schedule_drift_check failed: {exc}", flush=True)
+            log.error("schedule_drift_check failed", exc_info=True, extra={"error": str(exc)})
 
     # Forward-compat: response shape always includes a `conflicts` key. The
     # real list arrives via GET /conflicts once the background drift check

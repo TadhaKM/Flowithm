@@ -32,9 +32,12 @@ import anthropic
 from dotenv import load_dotenv
 
 from brain.embedder import get_embedding, get_embeddings_batch
+from brain.logger import get_logger
 from brain.store import get_client, save_workflow
 
 load_dotenv()
+
+log = get_logger("flowithm.drift")
 
 MODEL = "claude-sonnet-4-6"
 SKILLS_TABLE = "skills"
@@ -258,7 +261,7 @@ def check_for_drift(
             messages=[{"role": "user", "content": user_message}],
         )
         if message.stop_reason == "refusal":
-            print("[drift] Claude refused drift check", flush=True)
+            log.warning("Claude refused drift check")
             return []
 
         text = next((b.text for b in message.content if b.type == "text"), "")
@@ -291,11 +294,16 @@ def check_for_drift(
             return []
         insert = client.table(CONFLICTS_TABLE).insert(rows).execute()
         inserted = insert.data or []
-        print(f"[drift] {len(inserted)} conflict(s) recorded for {new_skill.get('process','?')}", flush=True)
+        log.info("conflicts recorded", extra={
+            "org_id": org,
+            "process": new_skill.get("process"),
+            "count": len(inserted),
+        })
         return inserted
 
     except Exception as exc:
-        print(f"[drift] check_for_drift failed: {exc}", flush=True)
+        log.error("check_for_drift failed", exc_info=True,
+                  extra={"error": str(exc)})
         return []
 
 
@@ -410,14 +418,17 @@ def check_chunks_against_skills(chunks: list, org_id: str | None = None) -> list
                     ins = client.table(CONFLICTS_TABLE).insert(row).execute()
                     inserted.extend(ins.data or [])
                 except Exception as exc:
-                    print(f"[drift] conflict insert failed: {exc}", flush=True)
+                    log.error("conflict insert failed", exc_info=True,
+                              extra={"error": str(exc), "org_id": org})
 
         if inserted:
-            print(f"[drift] {len(inserted)} chunk-vs-skill conflict(s) recorded", flush=True)
+            log.info("chunk-vs-skill conflicts recorded",
+                     extra={"org_id": org, "count": len(inserted)})
         return inserted
 
     except Exception as exc:
-        print(f"[drift] check_chunks_against_skills failed: {exc}", flush=True)
+        log.error("check_chunks_against_skills failed", exc_info=True,
+                  extra={"error": str(exc)})
         return []
 
 
@@ -474,7 +485,8 @@ def _check_chunk_against_skill(
         parsed = json.loads(text or "{}")
         return parsed if parsed.get("is_conflict") else None
     except Exception as exc:
-        print(f"[drift] _check_chunk_against_skill failed: {exc}", flush=True)
+        log.error("_check_chunk_against_skill failed", exc_info=True,
+                  extra={"error": str(exc), "skill": skill.get("process_name")})
         return None
 
 
@@ -486,7 +498,8 @@ def schedule_drift_check(
         try:
             check_for_drift(new_content, new_skill, org_id=org_id)
         except Exception as exc:
-            print(f"[drift] background check failed: {exc}", flush=True)
+            log.error("background drift check failed", exc_info=True,
+                      extra={"error": str(exc)})
     threading.Thread(target=_worker, daemon=True).start()
 
 
