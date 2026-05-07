@@ -370,7 +370,7 @@ authoritative; full message bodies via `git show <hash>`.
 | `3540708` | Anthropic retry wrapper + circuit breaker (`brain/anthropic_client.py`); every direct `messages.create` call swapped to `messages_create()` (commit 2 of 3) |
 | `3835def` | Real `/health` probe (Supabase + Anthropic + Voyage + scheduler + circuit-breaker checks) + `APP_VERSION` env (commit 3 of 3) |
 | `8e0af1c` | Production deployment: Dockerfile + railway.json + ui/vercel.json + .dockerignore + DEPLOYMENT.md + CORS lockdown via `FRONTEND_URL` |
-| _(next)_ | First-run onboarding flow: `/onboarding/connect` source picker + `/onboarding/generate` first-workflow page (with CSS confetti) + onboarding banner on `/brain` + step indicator + middleware whitelist for `/onboarding/*` |
+| `a0ad296` | First-run onboarding flow: `/onboarding/connect` source picker + `/onboarding/generate` first-workflow page (with CSS confetti) + onboarding banner on `/brain` + step indicator + middleware whitelist for `/onboarding/*` |
 
 ---
 
