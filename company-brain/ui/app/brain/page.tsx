@@ -77,6 +77,9 @@ export default function BrainPage() {
   const [conflictsLoaded, setConflictsLoaded] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
+  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
+  const [activeSourcesCount, setActiveSourcesCount] = useState<number | null>(null);
+
   const [search, setSearch] = useState("");
   const debouncedSearch = useDebounced(search, 150);
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
@@ -135,6 +138,25 @@ export default function BrainPage() {
     return () => window.clearTimeout(t);
   }, [toast]);
 
+  // Fetch last-sync + active source count for the 5th metric card. Same
+  // best-effort policy as conflicts — failure shouldn't break the page.
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([
+      fetch("/api/admin/ingest", { cache: "no-store" }).then((r) => r.ok ? r.json() : null).catch(() => null),
+      fetch("/api/admin/sources", { cache: "no-store" }).then((r) => r.ok ? r.json() : null).catch(() => null),
+    ]).then(([ingest, sources]) => {
+      if (cancelled) return;
+      setLastSyncedAt(ingest?.last_run?.started_at ?? null);
+      if (Array.isArray(sources)) {
+        setActiveSourcesCount(sources.filter((s: { is_active?: boolean }) => s.is_active).length);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const conflictCount = conflicts.length;
 
   function removeConflict(id: string) {
@@ -189,7 +211,12 @@ export default function BrainPage() {
           </p>
         </div>
 
-        <MetricsRow workflows={workflows} loading={loading} />
+        <MetricsRow
+          workflows={workflows}
+          loading={loading}
+          lastSyncedAt={lastSyncedAt}
+          activeSourcesCount={activeSourcesCount}
+        />
 
         {conflictCount > 0 && <ConflictBanner count={conflictCount} />}
 
@@ -266,6 +293,12 @@ function BrainHeader() {
         >
           Agent API
         </Link>
+        <Link
+          href="/brain/sources"
+          className="text-sm text-zinc-500 hover:text-zinc-300 transition-colors"
+        >
+          Sources
+        </Link>
       </div>
       <p className="text-sm text-zinc-500 hidden sm:block">
         Every workflow your team has captured
@@ -281,9 +314,13 @@ function BrainHeader() {
 function MetricsRow({
   workflows,
   loading,
+  lastSyncedAt,
+  activeSourcesCount,
 }: {
   workflows: Workflow[];
   loading: boolean;
+  lastSyncedAt: string | null;
+  activeSourcesCount: number | null;
 }) {
   const total = workflows.length;
   const sources = useMemo(() => {
@@ -309,7 +346,7 @@ function MetricsRow({
   }, [workflows]);
 
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 mb-8">
       <MetricCard label="Workflows mapped" icon={<GridIcon />} loading={loading}>
         <CountUp value={total} />
       </MetricCard>
@@ -360,6 +397,19 @@ function MetricsRow({
             style={{ width: `${coverage}%` }}
           />
         </div>
+      </MetricCard>
+
+      <MetricCard label="Last synced" icon={<ClockIcon />} loading={loading}>
+        <span className="text-base font-medium text-zinc-100">
+          {lastSyncedAt ? relativeTime(lastSyncedAt) : "Never"}
+        </span>
+        <p className="text-xs text-zinc-500 mt-1">
+          {activeSourcesCount === null
+            ? ""
+            : activeSourcesCount === 0
+              ? "No sources connected"
+              : `${activeSourcesCount} source${activeSourcesCount === 1 ? "" : "s"} active`}
+        </p>
       </MetricCard>
     </div>
   );
