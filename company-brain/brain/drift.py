@@ -1,12 +1,21 @@
 """Drift detection — does new content contradict any existing skill?
 
-Triggered after every workflow generation (UI or Slack). Pulls non-archived
-skills, ranks the most semantically similar (cosine over Voyage embeddings),
-asks Claude for genuine conflicts, persists them in the conflicts table.
+Two entry points:
+  check_for_drift(content, new_skill)
+      Triggered after every workflow generation (UI or Slack). new_skill is
+      a fully-structured workflow JSON; the model contrasts it against
+      existing skills as peers.
+
+  check_chunks_against_skills(chunks)
+      Triggered by the scheduler after every ingest cycle. Each chunk is
+      raw incoming knowledge (Slack thread, Notion page section, etc.).
+      Per chunk, find the most-similar skill and ask Claude whether the
+      chunk contradicts the skill's rules.
 
 Public surface:
-    check_for_drift(new_content, new_skill)         — run + persist; returns conflicts
-    schedule_drift_check(new_content, new_skill)    — fire-and-forget (daemon thread)
+    check_for_drift(new_content, new_skill)
+    check_chunks_against_skills(chunks)
+    schedule_drift_check(new_content, new_skill)    — fire-and-forget
     resolve_conflict(id, action, resolved_by)       — accept | dismiss | snooze
     get_unresolved_conflicts(include_snoozed=False) — feed for /conflicts
     get_conflict_history(skill_id)                  — full history per skill
@@ -279,6 +288,180 @@ def check_for_drift(new_content: str, new_skill: dict[str, Any]) -> list[dict[st
     except Exception as exc:
         print(f"[drift] check_for_drift failed: {exc}", flush=True)
         return []
+
+
+CHUNK_DRIFT_SYSTEM_PROMPT = (
+    "You are a knowledge consistency checker. You compare ONE new piece of "
+    "incoming company content against ONE existing documented process and "
+    "decide whether the new content contradicts a specific rule in the "
+    "process. Be strict — only flag genuine factual conflicts (e.g. the "
+    "process says X is required but the new content says X is no longer "
+    "required). Ignore overlap that merely restates or expands without "
+    "contradicting."
+)
+
+CHUNK_DRIFT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "is_conflict": {"type": "boolean"},
+        "conflict_type": {"type": ["string", "null"], "enum": ["contradiction", "update", "expansion", "deprecation", None]},
+        "conflict_description": {"type": ["string", "null"]},
+        "existing_rule": {"type": ["string", "null"]},
+        "new_evidence": {"type": ["string", "null"]},
+        "suggested_update": {"type": ["string", "null"]},
+        "severity": {"type": ["string", "null"], "enum": ["high", "medium", "low", None]},
+    },
+    "required": [
+        "is_conflict", "conflict_type", "conflict_description",
+        "existing_rule", "new_evidence", "suggested_update", "severity",
+    ],
+    "additionalProperties": False,
+}
+
+# Tunables for check_chunks_against_skills. Kept here so a future config
+# pass can lift them without hunting through the function body.
+CHUNK_MIN_SKILL_SIMILARITY = 0.45  # below this, the chunk is likely off-topic
+CHUNK_TOP_K_CANDIDATES = 2          # ask Claude about the top-N most similar skills
+CHUNK_DRIFT_PREVIEW_CHARS = 1500    # cap chunk length sent to the LLM
+
+
+def check_chunks_against_skills(chunks: list) -> list[dict[str, Any]]:
+    """Per-chunk drift check against existing non-archived skills.
+
+    For each incoming chunk:
+      1. Embed it (one batch call for the whole list).
+      2. Cosine against every skill's pre-computed summary_embedding.
+      3. For the top-N most-similar skills above CHUNK_MIN_SKILL_SIMILARITY,
+         ask Claude (one call per pair) whether the chunk contradicts the
+         skill's rules.
+      4. Persist any conflicts as 'unresolved' rows in the conflicts table.
+
+    Returns the inserted conflict rows. Always non-raising — the scheduler
+    surfaces failures via ingest_runs.errors instead of crashing the cycle.
+    """
+    if not chunks:
+        return []
+
+    try:
+        client = get_client()
+        sk_resp = (
+            client.table(SKILLS_TABLE)
+            .select("id,process_name,description,process_trigger,steps,decision_rules,approvals,exceptions,sources,summary_embedding")
+            .eq("archived", False)
+            .not_.is_("summary_embedding", "null")
+            .execute()
+        )
+        skills = sk_resp.data or []
+        if not skills:
+            return []
+
+        chunk_texts = [_chunk_content(c)[:CHUNK_DRIFT_PREVIEW_CHARS] for c in chunks]
+        # Skip chunks that ended up empty after preview-cap.
+        usable = [(i, t) for i, t in enumerate(chunk_texts) if t.strip()]
+        if not usable:
+            return []
+        idx_map = [i for i, _ in usable]
+        chunk_vecs = get_embeddings_batch([t for _, t in usable])
+
+        anthropic_client = anthropic.Anthropic()
+        inserted: list[dict[str, Any]] = []
+
+        for i_chunk, vec in zip(idx_map, chunk_vecs):
+            chunk = chunks[i_chunk]
+            scored = sorted(
+                ((s, _cosine(vec, s["summary_embedding"])) for s in skills),
+                key=lambda kv: kv[1],
+                reverse=True,
+            )
+            top = [(s, sim) for s, sim in scored[:CHUNK_TOP_K_CANDIDATES] if sim >= CHUNK_MIN_SKILL_SIMILARITY]
+            if not top:
+                continue
+
+            for skill, _sim in top:
+                hit = _check_chunk_against_skill(anthropic_client, _chunk_content(chunk), skill)
+                if not hit:
+                    continue
+                row = {
+                    "existing_skill_id": str(skill["id"]),
+                    "new_skill_id": None,
+                    "existing_process_name": skill.get("process_name") or "",
+                    "conflict_type": hit.get("conflict_type") or "contradiction",
+                    "conflict_description": hit.get("conflict_description") or "",
+                    "existing_rule": hit.get("existing_rule") or "",
+                    "new_evidence": hit.get("new_evidence") or _chunk_content(chunk)[:240],
+                    "suggested_update": hit.get("suggested_update") or "",
+                    "severity": hit.get("severity") or "medium",
+                }
+                try:
+                    ins = client.table(CONFLICTS_TABLE).insert(row).execute()
+                    inserted.extend(ins.data or [])
+                except Exception as exc:
+                    print(f"[drift] conflict insert failed: {exc}", flush=True)
+
+        if inserted:
+            print(f"[drift] {len(inserted)} chunk-vs-skill conflict(s) recorded", flush=True)
+        return inserted
+
+    except Exception as exc:
+        print(f"[drift] check_chunks_against_skills failed: {exc}", flush=True)
+        return []
+
+
+def _chunk_content(chunk: Any) -> str:
+    """Accept a Chunk dataclass OR a {'content': ...} dict for flexibility."""
+    if hasattr(chunk, "content"):
+        return getattr(chunk, "content") or ""
+    if isinstance(chunk, dict):
+        return chunk.get("content") or ""
+    return str(chunk)
+
+
+def _check_chunk_against_skill(
+    anthropic_client, chunk_text: str, skill: dict[str, Any]
+) -> dict[str, Any] | None:
+    """One Claude call: does THIS chunk contradict THIS skill? Returns a
+    conflict dict on hit, None otherwise. Non-raising; logs and returns
+    None on transient failures."""
+    try:
+        skill_for_llm = {
+            "process": skill.get("process_name") or "",
+            "description": skill.get("description") or "",
+            "trigger": skill.get("process_trigger") or "",
+            "steps": skill.get("steps") or [],
+            "decision_rules": skill.get("decision_rules") or [],
+            "approvals": skill.get("approvals") or [],
+            "exceptions": skill.get("exceptions") or [],
+        }
+        user_message = (
+            "Existing process:\n"
+            f"{json.dumps(skill_for_llm, indent=2, ensure_ascii=False, default=str)}\n\n"
+            "New incoming knowledge (a single chunk from Slack/Notion/etc.):\n"
+            f"{chunk_text[:CHUNK_DRIFT_PREVIEW_CHARS]}\n\n"
+            "Decide: does this new chunk contradict, update, expand, or "
+            "deprecate a specific rule in the existing process? Set "
+            "is_conflict=false if not. If yes, set is_conflict=true and "
+            "fill conflict_type, severity, and the rule + evidence + "
+            "suggested_update strings."
+        )
+        msg = anthropic_client.messages.create(
+            model=MODEL,
+            max_tokens=1024,
+            system=[{"type": "text", "text": CHUNK_DRIFT_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+            thinking={"type": "adaptive"},
+            output_config={
+                "effort": "medium",
+                "format": {"type": "json_schema", "schema": CHUNK_DRIFT_SCHEMA},
+            },
+            messages=[{"role": "user", "content": user_message}],
+        )
+        if msg.stop_reason == "refusal":
+            return None
+        text = next((b.text for b in msg.content if b.type == "text"), "")
+        parsed = json.loads(text or "{}")
+        return parsed if parsed.get("is_conflict") else None
+    except Exception as exc:
+        print(f"[drift] _check_chunk_against_skill failed: {exc}", flush=True)
+        return None
 
 
 def schedule_drift_check(new_content: str, new_skill: dict[str, Any]) -> None:

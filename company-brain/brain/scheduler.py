@@ -95,6 +95,7 @@ class IngestionScheduler:
         results['errors'] so a single bad source can't kill the cycle."""
         # Lazy imports — keep this module importable without optional deps
         # (tests that just import scheduler shouldn't pay for supabase, etc.).
+        from brain.drift import check_chunks_against_skills
         from brain.embedder import embed_and_store
         from brain.store import (
             insert_ingest_run,
@@ -108,10 +109,15 @@ class IngestionScheduler:
         results: dict[str, Any] = {
             "new_chunks": 0,
             "skipped_chunks": 0,
-            "new_conflicts": 0,  # always 0 for now — see scheduler module docstring
+            "new_conflicts": 0,
             "sources_checked": 0,
             "errors": [],
         }
+        # Collect chunks that actually got embedded this cycle so we can run
+        # the chunk-vs-skill drift pass once at the end (single LLM batch
+        # instead of per-source — saves Claude calls and surfaces conflicts
+        # across the whole sync at once).
+        newly_embedded: list = []
         print(f"[Flowithm scheduler] cycle start {started_at.isoformat()}", flush=True)
 
         try:
@@ -132,6 +138,7 @@ class IngestionScheduler:
                         results["skipped_chunks"] += 1
                     else:
                         results["new_chunks"] += 1
+                        newly_embedded.append(chunk)
                 update_source_last_synced(str(source["id"]), _now_utc().isoformat())
             except NotImplementedError as exc:
                 msg = f"{source['source_type']} source {source['id']}: {exc}"
@@ -140,6 +147,17 @@ class IngestionScheduler:
             except Exception as exc:
                 msg = f"{source['source_type']} source {source['id']}: {exc}"
                 logger.exception(msg)
+                results["errors"].append(msg)
+
+        # Drift check: only the chunks that were actually new this cycle.
+        # If de-dup skipped everything, there's nothing to compare.
+        if newly_embedded:
+            try:
+                conflicts = check_chunks_against_skills(newly_embedded)
+                results["new_conflicts"] = len(conflicts)
+            except Exception as exc:
+                msg = f"check_chunks_against_skills: {exc}"
+                logger.error(msg)
                 results["errors"].append(msg)
 
         duration_seconds = max(0, int((_now_utc() - started_at).total_seconds()))
