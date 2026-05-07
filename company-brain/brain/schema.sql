@@ -269,6 +269,48 @@ create index if not exists ingest_runs_started_idx on ingest_runs (started_at de
 
 
 -- ---------------------------------------------------------------------------
+-- ingest_lock — multi-worker mutex
+-- ---------------------------------------------------------------------------
+-- Originally intended as pg_try_advisory_lock(12345) but Supabase's default
+-- pgbouncer runs in transaction-pool mode, which doesn't preserve
+-- session-scoped advisory locks across the two RPC calls (acquire + release)
+-- that supabase-py has to make. The lock would auto-release when the
+-- acquire RPC's connection returned to the pool, defeating the purpose.
+--
+-- Same semantics achieved with a singleton row-mutex: only one worker holds
+-- it at a time, and a 15-minute timeout reclaims the lock if a worker dies
+-- mid-cycle so the system self-heals.
+create table if not exists ingest_lock (
+    id         integer       primary key default 1,
+    locked_at  timestamptz,
+    locked_by  text,
+    constraint ingest_lock_singleton check (id = 1)
+);
+insert into ingest_lock (id) values (1) on conflict (id) do nothing;
+
+-- Returns true iff this caller acquired the lock. Atomic — UPDATE WHERE
+-- handles the race directly. A stale lock older than 15 minutes is treated
+-- as free.
+create or replace function try_acquire_ingest_lock(holder text) returns boolean
+language plpgsql
+as $$
+begin
+    update ingest_lock
+    set locked_at = now(), locked_by = holder
+    where id = 1
+      and (locked_at is null or locked_at < now() - interval '15 minutes');
+    return found;
+end;
+$$;
+
+create or replace function release_ingest_lock() returns void
+language sql
+as $$
+    update ingest_lock set locked_at = null, locked_by = null where id = 1;
+$$;
+
+
+-- ---------------------------------------------------------------------------
 -- Atomic counter bump for api_keys.request_count + last_used_at.
 -- Called from the per-request BackgroundTask in api/auth.py. Doing this
 -- as a single SQL statement avoids the read-modify-write race on counter.

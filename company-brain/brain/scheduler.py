@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import socket
 import threading
 from datetime import datetime, timezone
 from typing import Any
@@ -90,20 +91,47 @@ class IngestionScheduler:
     # The cycle
     # ------------------------------------------------------------------
 
-    def run_ingest_cycle(self) -> dict[str, Any]:
+    def run_ingest_cycle(self) -> dict[str, Any] | None:
         """Single ingestion pass. Always non-raising — errors collect into
-        results['errors'] so a single bad source can't kill the cycle."""
+        results['errors'] so a single bad source can't kill the cycle.
+
+        Multi-worker safe: tries to acquire a singleton DB row-mutex first;
+        returns None if another worker is already mid-cycle.
+        """
         # Lazy imports — keep this module importable without optional deps
         # (tests that just import scheduler shouldn't pay for supabase, etc.).
         from brain.drift import check_chunks_against_skills
         from brain.embedder import embed_and_store
         from brain.store import (
+            get_client,
             insert_ingest_run,
             list_active_connected_sources,
             update_source_last_synced,
         )
         from ingest.ingest_notion import NotionIngestor
         from ingest.ingest_slack import SlackIngestor
+
+        # ---- mutex acquisition ----
+        # If the lock RPCs aren't migrated yet, we proceed without locking
+        # rather than refusing to ingest — better degraded behaviour than
+        # broken behaviour for users mid-migration.
+        client = get_client()
+        holder = f"{socket.gethostname()}:{os.getpid()}"
+        acquired = True
+        lock_supported = True
+        try:
+            resp = client.rpc("try_acquire_ingest_lock", {"holder": holder}).execute()
+            acquired = bool(resp.data)
+        except Exception as exc:
+            print(f"[Flowithm scheduler] lock RPC unavailable, running unlocked: {exc}", flush=True)
+            lock_supported = False
+
+        if not acquired:
+            print(
+                "[Flowithm scheduler] Skipping ingest — lock held by another worker",
+                flush=True,
+            )
+            return None
 
         started_at = _now_utc()
         results: dict[str, Any] = {
@@ -172,6 +200,14 @@ class IngestionScheduler:
             insert_ingest_run(summary)
         except Exception as exc:
             logger.error("ingest_runs insert failed: %s", exc)
+
+        # Release the mutex. Best-effort — the 15-minute timeout on the
+        # acquire side reclaims a stuck lock anyway.
+        if lock_supported:
+            try:
+                client.rpc("release_ingest_lock").execute()
+            except Exception as exc:
+                logger.warning("release_ingest_lock failed: %s", exc)
 
         logger.info(
             "Scheduled ingest complete: %s new chunks, %s skipped, %s conflicts, %s errors — %ss",
