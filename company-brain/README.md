@@ -80,3 +80,63 @@ The API will be available at http://localhost:8000.
 ## Usage
 
 Open the UI, ask a question, and the backend will retrieve relevant chunks from the vector store and answer with Claude.
+
+## Connecting Gmail
+
+Gmail is the highest-value source for capturing real process decisions —
+escalations, exceptions, and edge cases that never made it into formal
+documentation. Setup is one-time per account.
+
+1. Create a Google Cloud project at <https://console.cloud.google.com>.
+2. Enable the **Gmail API** for that project.
+3. Create OAuth 2.0 credentials with application type **Desktop app**.
+4. Download the resulting `client_secret.json` to your project root.
+5. Add `GOOGLE_CLIENT_SECRET_PATH=client_secret.json` to your `.env`.
+6. Run the one-shot bootstrap:
+   ```bash
+   python -m ingest.gmail_auth
+   ```
+   A browser window will open — sign in with the Gmail account you want
+   Flowithm to read.
+7. Open the generated `gmail_token.json` and copy its full contents.
+8. In the dashboard, **Sources → + Connect source → Gmail**:
+   - Paste the token contents into **Credentials JSON**.
+   - Add a comma-separated list of **Label filters**, e.g. `process, policy, escalation, runbook`. Only threads with at least one of these labels get ingested.
+   - Click **Connect**.
+
+The scheduler will fetch matching threads on every cycle. Single-message
+threads are skipped by default (see `min_thread_length`).
+
+## Connecting Intercom
+
+Intercom support conversations are where edge cases get decided in real
+time. The ingestor focuses on closed conversations — preferably tagged
+with something like `escalated` or `policy-question`.
+
+1. In Intercom: **Settings → Developers → Your apps**. Create a new app
+   (or pick an existing one).
+2. Copy the **Access Token** from the app's Authentication tab.
+3. (Recommended) Create an `escalated` tag in Intercom and apply it to
+   conversations where unusual decisions were made. Flowithm will
+   prioritise these.
+4. In the dashboard, **Sources → + Connect source → Intercom**:
+   - Paste the **Access token**.
+   - Add comma-separated **Tags to watch** (optional — leave blank to
+     ingest every closed conversation).
+   - Set **Min message count** (default 3) to skip simple FAQ exchanges.
+   - Click **Connect**.
+
+The scheduler paginates through `/conversations/search` and pulls each
+matching thread on every cycle.
+
+## Verifying a connected source
+
+After connecting, click **Sync now** on the Sources page. Watch the
+FastAPI terminal for:
+
+```
+[Flowithm scheduler] cycle done — 12 new, 47 skipped, 0 errors, 14s
+```
+
+If the source row records errors instead, they appear in the
+last-run banner above the source list — click **view logs** to expand.

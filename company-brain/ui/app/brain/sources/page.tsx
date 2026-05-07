@@ -448,31 +448,77 @@ function AddSourceModal({
 }) {
   const [sourceType, setSourceType] = useState<Source["source_type"]>("slack");
   const [displayName, setDisplayName] = useState("");
-  const [token, setToken] = useState("");
-  const [idsText, setIdsText] = useState(""); // comma-separated channel or page ids
+  // Per-source-type fields kept in one bag — only the relevant subset is read at submit.
+  const [token, setToken] = useState("");          // slack/notion/github single token; intercom access_token
+  const [idsText, setIdsText] = useState("");      // slack channels / notion pages
+  const [credsJson, setCredsJson] = useState("");  // gmail credentials_json
+  const [labelsText, setLabelsText] = useState("");// gmail labels
+  const [tagsText, setTagsText] = useState("");    // intercom tags (optional)
+  const [minMsgCount, setMinMsgCount] = useState<number>(3); // intercom min_message_count
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  function commaList(s: string): string[] {
+    return s.split(",").map((x) => x.trim()).filter(Boolean);
+  }
+
+  function buildConfig(): { config: Record<string, unknown>; missing: string[] } {
+    const missing: string[] = [];
+    if (!displayName.trim()) missing.push("display name");
+
+    if (sourceType === "slack") {
+      if (!token.trim()) missing.push("bot token");
+      const ids = commaList(idsText);
+      if (ids.length === 0) missing.push("channel ids");
+      return { config: { bot_token: token.trim(), channel_ids: ids }, missing };
+    }
+    if (sourceType === "notion") {
+      if (!token.trim()) missing.push("integration token");
+      const ids = commaList(idsText);
+      if (ids.length === 0) missing.push("page ids");
+      return { config: { integration_token: token.trim(), page_ids: ids }, missing };
+    }
+    if (sourceType === "gmail") {
+      if (!credsJson.trim()) missing.push("credentials JSON");
+      const labels = commaList(labelsText);
+      if (labels.length === 0) missing.push("label filters");
+      // Validate JSON shape early so the user sees a clear error here.
+      let parsed = "";
+      try {
+        parsed = JSON.stringify(JSON.parse(credsJson || "{}"));
+      } catch {
+        missing.push("valid JSON in Credentials");
+      }
+      return {
+        config: { credentials_json: parsed || credsJson.trim(), label_filters: labels, min_thread_length: 2 },
+        missing,
+      };
+    }
+    if (sourceType === "intercom") {
+      if (!token.trim()) missing.push("access token");
+      const tags = commaList(tagsText);
+      const cfg: Record<string, unknown> = {
+        access_token: token.trim(),
+        min_message_count: Math.max(1, Number.isFinite(minMsgCount) ? minMsgCount : 3),
+      };
+      if (tags.length > 0) cfg.tags = tags;
+      return { config: cfg, missing };
+    }
+    // github (no live ingestor yet — accept generic shape)
+    if (!token.trim()) missing.push("token");
+    const ids = commaList(idsText);
+    return { config: { token: token.trim(), ids }, missing };
+  }
+
   async function submit() {
     if (pending) return;
-    if (!displayName.trim() || !token.trim() || !idsText.trim()) {
-      setError("All fields required.");
+    const { config, missing } = buildConfig();
+    if (missing.length > 0) {
+      setError(`Missing: ${missing.join(", ")}`);
       return;
     }
     setPending(true);
     setError(null);
-    const ids = idsText
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-
-    const config =
-      sourceType === "slack"
-        ? { bot_token: token.trim(), channel_ids: ids }
-        : sourceType === "notion"
-          ? { integration_token: token.trim(), page_ids: ids }
-          : { token: token.trim(), ids };
-
     try {
       const res = await fetch("/api/admin/sources", {
         method: "POST",
@@ -489,15 +535,12 @@ function AddSourceModal({
     }
   }
 
-  const tokenLabel = sourceType === "slack" ? "Bot token (xoxb-…)" : sourceType === "notion" ? "Integration token (secret_…)" : "Token";
-  const idsLabel = sourceType === "slack" ? "Channel IDs (comma-separated)" : sourceType === "notion" ? "Page IDs (comma-separated)" : "IDs (comma-separated)";
-
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
-      <div className="w-full max-w-lg rounded-xl border border-zinc-800 bg-zinc-950 p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+      <div className="w-full max-w-lg rounded-xl border border-zinc-800 bg-zinc-950 p-6 shadow-2xl max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
         <h4 className="text-base font-medium text-zinc-100">Connect source</h4>
         <p className="mt-1 text-xs text-zinc-500">
-          The token is stored server-side and never exposed in the dashboard.
+          Tokens are stored server-side and never exposed in the dashboard.
         </p>
 
         <label className="mt-4 block text-xs uppercase tracking-wider text-zinc-500">Source type</label>
@@ -508,6 +551,8 @@ function AddSourceModal({
         >
           <option value="slack">Slack</option>
           <option value="notion">Notion</option>
+          <option value="gmail">Gmail</option>
+          <option value="intercom">Intercom</option>
           <option value="github">GitHub</option>
         </select>
 
@@ -515,26 +560,112 @@ function AddSourceModal({
         <input
           value={displayName}
           onChange={(e) => setDisplayName(e.target.value)}
-          placeholder="e.g. Engineering Slack"
+          placeholder={
+            sourceType === "slack" ? "e.g. Engineering Slack"
+              : sourceType === "notion" ? "e.g. Product Wiki"
+              : sourceType === "gmail" ? "e.g. Support inbox"
+              : sourceType === "intercom" ? "e.g. Customer support"
+              : "e.g. Source name"
+          }
           className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:border-[#1D9E75] focus:outline-none"
         />
 
-        <label className="mt-3 block text-xs uppercase tracking-wider text-zinc-500">{tokenLabel}</label>
-        <input
-          type="password"
-          value={token}
-          onChange={(e) => setToken(e.target.value)}
-          placeholder="paste token here"
-          className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:border-[#1D9E75] focus:outline-none font-mono"
-        />
+        {/* Per-source-type fields */}
+        {(sourceType === "slack" || sourceType === "notion" || sourceType === "github") && (
+          <>
+            <FieldLabel>{
+              sourceType === "slack" ? "Bot token (xoxb-…)"
+                : sourceType === "notion" ? "Integration token (secret_…)"
+                : "Token"
+            }</FieldLabel>
+            <input
+              type="password"
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              placeholder="paste token here"
+              className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:border-[#1D9E75] focus:outline-none font-mono"
+            />
 
-        <label className="mt-3 block text-xs uppercase tracking-wider text-zinc-500">{idsLabel}</label>
-        <input
-          value={idsText}
-          onChange={(e) => setIdsText(e.target.value)}
-          placeholder="C0123ABC, C4567DEF"
-          className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:border-[#1D9E75] focus:outline-none font-mono"
-        />
+            <FieldLabel>{
+              sourceType === "slack" ? "Channel IDs (comma-separated)"
+                : sourceType === "notion" ? "Page IDs (comma-separated)"
+                : "IDs (comma-separated)"
+            }</FieldLabel>
+            <input
+              value={idsText}
+              onChange={(e) => setIdsText(e.target.value)}
+              placeholder={sourceType === "slack" ? "C0123ABC, C4567DEF" : "abc123…, def456…"}
+              className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:border-[#1D9E75] focus:outline-none font-mono"
+            />
+          </>
+        )}
+
+        {sourceType === "gmail" && (
+          <>
+            <FieldLabel>Credentials JSON</FieldLabel>
+            <textarea
+              value={credsJson}
+              onChange={(e) => setCredsJson(e.target.value)}
+              placeholder='{"token":"…","refresh_token":"…","client_id":"…",…}'
+              rows={6}
+              className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs text-zinc-100 placeholder-zinc-600 focus:border-[#1D9E75] focus:outline-none font-mono"
+            />
+            <p className="mt-1 text-[11px] text-zinc-500">
+              Run <code className="text-zinc-300">python -m ingest.gmail_auth</code> to generate
+              this — see the README&apos;s Gmail section.
+            </p>
+
+            <FieldLabel>Label filters (comma-separated)</FieldLabel>
+            <input
+              value={labelsText}
+              onChange={(e) => setLabelsText(e.target.value)}
+              placeholder="process, policy, escalation, runbook"
+              className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:border-[#1D9E75] focus:outline-none font-mono"
+            />
+            <p className="mt-1 text-[11px] text-zinc-500">
+              Only Gmail threads with at least one of these labels are ingested.
+            </p>
+          </>
+        )}
+
+        {sourceType === "intercom" && (
+          <>
+            <FieldLabel>Access token</FieldLabel>
+            <input
+              type="password"
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              placeholder="paste access token here"
+              className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:border-[#1D9E75] focus:outline-none font-mono"
+            />
+            <p className="mt-1 text-[11px] text-zinc-500">
+              Find this in Intercom Settings → Developers → Access Tokens.
+            </p>
+
+            <FieldLabel>Tags to watch (comma-separated, optional)</FieldLabel>
+            <input
+              value={tagsText}
+              onChange={(e) => setTagsText(e.target.value)}
+              placeholder="escalated, exception, policy-question"
+              className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:border-[#1D9E75] focus:outline-none font-mono"
+            />
+            <p className="mt-1 text-[11px] text-zinc-500">
+              Leave blank to ingest all closed conversations.
+            </p>
+
+            <FieldLabel>Min message count</FieldLabel>
+            <input
+              type="number"
+              min={1}
+              value={minMsgCount}
+              onChange={(e) => setMinMsgCount(parseInt(e.target.value, 10) || 1)}
+              className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-[#1D9E75] focus:outline-none font-mono"
+            />
+            <p className="mt-1 text-[11px] text-zinc-500">
+              Skip conversations shorter than this — filters out simple FAQ exchanges.
+            </p>
+          </>
+        )}
 
         {error && (
           <div className="mt-3 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
@@ -556,6 +687,14 @@ function AddSourceModal({
         </div>
       </div>
     </div>
+  );
+}
+
+function FieldLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <label className="mt-3 block text-xs uppercase tracking-wider text-zinc-500">
+      {children}
+    </label>
   );
 }
 
