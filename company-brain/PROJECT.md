@@ -71,6 +71,7 @@ is the scheduler-driven ingestor that **fetches** message history.
 |---|---|
 | `text_utils.py` | Owns the `cl100k_base` tiktoken encoder. `count_tokens()`, `cap_tokens(strategy="truncate" \| "middle_out" \| "smart")` — the single canonical token-budget helper used everywhere. |
 | `logger.py` | `get_logger(name)` returns a stdlib logger configured with a JSON formatter writing to stdout. Reserved keys (`org_id`, `duration_ms`, `request_id`, `status_code`, `endpoint`) get top-level keys; the rest of `extra={...}` lands under `"extra"`. `LOG_LEVEL` env var overrides the default INFO. |
+| `anthropic_client.py` | `messages_create(client, **kwargs)` wraps `client.messages.create` with retry (3× exp backoff on 429/5xx/connection errors), per-call timeout (`ANTHROPIC_TIMEOUT_SECONDS`, default 60), and a process-wide circuit breaker that opens after 5 consecutive failures and stays open 60s. `CircuitOpenError` lets callers degrade gracefully. |
 | `chunker.py` | `chunk_text()` — splits a long string into overlapping ~600-token chunks. Pulls its encoder from `text_utils` so there's exactly one cl100k_base instance. |
 | `ingestors.py` | `BaseIngestor` ABC + `Chunk` dataclass shared by every concrete ingestor. `process()` does build → validate → log filtering; `validate()` drops short or null-source chunks. |
 | `embedder.py` | Voyage `voyage-3` embeddings + Supabase chunk storage. Public surface: `get_embedding`, `get_embeddings_batch`, `chunk_exists`, `store_chunk`, `embed_and_store`, `embed_query`. SHA-256 dedup on `chunks.content_hash`. |
@@ -354,7 +355,8 @@ authoritative; full message bodies via `git show <hash>`.
 | `8c60168` | Multi-tenancy backend wiring: every store helper takes `org_id`, scheduler runs per-org, auth extracts org from API key, `POST /setup` endpoint, `X-Org-ID` header on Slack bot calls (commit 2 of 3) |
 | `4cc4616` | Multi-tenancy dashboard: `/setup` page, `flowithm_org_id` httpOnly cookie, Next.js middleware redirect, `lib/org.ts` helper, every proxy route forwards `X-Org-ID` (commit 3 of 3) |
 | `0195ed9` | Backfill commit hash in PROJECT.md build history |
-| _(next)_ | Structured JSON logger (`brain/logger.py`) + global FastAPI exception handlers; `print()` calls in scheduler / drift / embedder / staleness / query / api replaced with structured logs (commit 1 of 3) |
+| `1febad9` | Structured JSON logger (`brain/logger.py`) + global FastAPI exception handlers; `print()` calls in scheduler / drift / embedder / staleness / query / api replaced with structured logs (commit 1 of 3) |
+| _(next)_ | Anthropic retry wrapper + circuit breaker (`brain/anthropic_client.py`); every direct `messages.create` call swapped to `messages_create()` (commit 2 of 3) |
 
 ---
 

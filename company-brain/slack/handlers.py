@@ -689,7 +689,10 @@ def _format_ts(ts: str) -> str:
 
 def _detect_process_name(thread_text: str) -> str:
     """Ask Claude for a 2-5 word process name."""
-    msg = _anthropic().messages.create(
+    from brain.anthropic_client import messages_create
+
+    msg = messages_create(
+        _anthropic(),
         model=CLAUDE_MODEL,
         max_tokens=64,
         messages=[

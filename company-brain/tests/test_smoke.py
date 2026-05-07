@@ -2,6 +2,7 @@
 
 
 def test_brain_modules_import():
+    import brain.anthropic_client  # noqa: F401
     import brain.chunker  # noqa: F401
     import brain.drift  # noqa: F401
     import brain.embedder  # noqa: F401

@@ -29,6 +29,7 @@ from typing import Any
 import anthropic
 from dotenv import load_dotenv
 
+from brain.anthropic_client import CircuitOpenError, messages_create
 from brain.embedder import embed_query
 from brain.logger import get_logger
 from brain.store import save_workflow, similarity_search
@@ -218,20 +219,31 @@ def query_brain(question: str, top_k: int = 6, org_id: str | None = None) -> dic
     user_message = f"Knowledge context:\n\n{context}\n\nQuestion: {question}"
 
     client = anthropic.Anthropic()
-    message = client.messages.create(
-        model=MODEL,
-        max_tokens=2048,
-        system=[
-            {
-                "type": "text",
-                "text": QUERY_SYSTEM_PROMPT,
-                "cache_control": {"type": "ephemeral"},
-            }
-        ],
-        thinking={"type": "adaptive"},
-        output_config={"effort": "medium"},
-        messages=[{"role": "user", "content": user_message}],
-    )
+    try:
+        message = messages_create(
+            client,
+            model=MODEL,
+            max_tokens=2048,
+            system=[
+                {
+                    "type": "text",
+                    "text": QUERY_SYSTEM_PROMPT,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            thinking={"type": "adaptive"},
+            output_config={"effort": "medium"},
+            messages=[{"role": "user", "content": user_message}],
+        )
+    except CircuitOpenError:
+        # Anthropic upstream is unhealthy — return a degraded answer
+        # rather than failing. The user can retry; circuit auto-resets.
+        log.warning("query_brain degraded — anthropic circuit open")
+        return {
+            "answer": "Service temporarily degraded — please retry in a moment.",
+            "sources": [],
+            "confidence": "low",
+        }
 
     answer = "".join(b.text for b in message.content if b.type == "text")
 
@@ -277,7 +289,8 @@ def generate_skills_file(
     user_message = f"Process name: {process_name}\n\nKnowledge chunks:\n\n{context}"
 
     client = anthropic.Anthropic()
-    message = client.messages.create(
+    message = messages_create(
+        client,
         model=MODEL,
         max_tokens=4096,
         system=[
@@ -323,7 +336,8 @@ def generate_workflow_from_text(
     user_message = f"Process name: {name}\n\nSource material:\n\n{content}"
 
     client = anthropic.Anthropic()
-    message = client.messages.create(
+    message = messages_create(
+        client,
         model=MODEL,
         max_tokens=4096,
         system=[

@@ -31,6 +31,7 @@ from typing import Any
 import anthropic
 from dotenv import load_dotenv
 
+from brain.anthropic_client import messages_create
 from brain.embedder import get_embedding, get_embeddings_batch
 from brain.logger import get_logger
 from brain.store import get_client, save_workflow
@@ -249,7 +250,8 @@ def check_for_drift(
             "conflicts exist."
         )
 
-        message = anthropic_client.messages.create(
+        message = messages_create(
+            anthropic_client,
             model=MODEL,
             max_tokens=4096,
             system=[{"type": "text", "text": DRIFT_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
@@ -468,7 +470,8 @@ def _check_chunk_against_skill(
             "fill conflict_type, severity, and the rule + evidence + "
             "suggested_update strings."
         )
-        msg = anthropic_client.messages.create(
+        msg = messages_create(
+            anthropic_client,
             model=MODEL,
             max_tokens=1024,
             system=[{"type": "text", "text": CHUNK_DRIFT_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
@@ -743,7 +746,8 @@ def _apply_update_via_claude(old_skill: dict[str, Any], suggested_update: str) -
         "Return the full updated workflow JSON, preserving fields not mentioned in the instruction."
     )
     client = anthropic.Anthropic()
-    message = client.messages.create(
+    message = messages_create(
+        client,
         model=MODEL,
         max_tokens=4096,
         system=[{"type": "text", "text": APPLY_UPDATE_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],

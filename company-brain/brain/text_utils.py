@@ -51,8 +51,10 @@ def cap_tokens(text: str, max_tokens: int, strategy: str = "truncate") -> str:
 
 
 def _smart_summarise(text: str, max_tokens: int) -> str:
-    # Lazy import — keeps text_utils importable without anthropic installed.
+    # Lazy imports — keeps text_utils importable without anthropic installed.
     import anthropic
+
+    from brain.anthropic_client import messages_create
 
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     prompt = (
@@ -61,7 +63,8 @@ def _smart_summarise(text: str, max_tokens: int) -> str:
         "Cut only narrative/context.\n\n"
         f"{text}"
     )
-    msg = client.messages.create(
+    msg = messages_create(
+        client,
         model=CLAUDE_HAIKU_MODEL,
         max_tokens=max_tokens,
         messages=[{"role": "user", "content": prompt}],

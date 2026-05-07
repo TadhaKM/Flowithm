@@ -476,7 +476,9 @@ def _maybe_trigger_drift_from_exception(skill_id: str, exception_note: str) -> N
             "Is this exception already covered (anywhere — steps, decision_rules, "
             "approvals, or exceptions) in the skill? Reply only YES or NO."
         )
-        msg = client.messages.create(
+        from brain.anthropic_client import messages_create
+        msg = messages_create(
+            client,
             model="claude-haiku-4-5-20251001",
             max_tokens=8,
             messages=[{"role": "user", "content": prompt}],
