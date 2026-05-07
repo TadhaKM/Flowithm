@@ -3,12 +3,15 @@
 // First-run setup. Renders when no `flowithm_org_id` cookie is present.
 // Submits {company_name, user_name?} to /api/setup which creates the
 // organisation server-side and sets the httpOnly cookie. After success,
-// the user is redirected to /brain — every subsequent admin proxy
-// request reads the cookie and forwards X-Org-ID to FastAPI.
+// the user advances to /onboarding/connect (step 2) — onboarding
+// progress is tracked in localStorage so the dashboard knows whether
+// to show the "finish setup" banner.
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+
+import StepIndicator from "../onboarding/_components/StepIndicator";
 
 export default function SetupPage() {
   const router = useRouter();
@@ -38,7 +41,13 @@ export default function SetupPage() {
       if (!res.ok) {
         throw new Error(body?.error || `HTTP ${res.status}`);
       }
-      router.push("/brain");
+      // Mark step 1 complete and advance the user to step 2.
+      try {
+        window.localStorage.setItem("flowithm_onboarding_step", "connect");
+      } catch {
+        /* localStorage may be disabled — onboarding banner just won't appear */
+      }
+      router.push("/onboarding/connect");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setPending(false);
@@ -53,6 +62,8 @@ export default function SetupPage() {
             Flowithm
           </Link>
         </div>
+
+        <StepIndicator active="setup" />
 
         <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-7 shadow-xl shadow-black/20">
           <h1 className="text-xl font-medium tracking-tight text-zinc-100">

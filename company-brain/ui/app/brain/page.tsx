@@ -82,6 +82,24 @@ export default function BrainPage() {
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
   const [activeSourcesCount, setActiveSourcesCount] = useState<number | null>(null);
 
+  // Onboarding banner state. Reads localStorage on mount; if the user
+  // hasn't reached 'complete' yet, the banner nudges them. Auto-completes
+  // (and hides the banner) the first time the workflow list isn't empty.
+  const [onboardingStep, setOnboardingStep] = useState<string | null>(null);
+  useEffect(() => {
+    try {
+      setOnboardingStep(window.localStorage.getItem("flowithm_onboarding_step"));
+    } catch { /* ignore */ }
+  }, []);
+  useEffect(() => {
+    if (workflows.length > 0 && onboardingStep && onboardingStep !== "complete") {
+      try {
+        window.localStorage.setItem("flowithm_onboarding_step", "complete");
+      } catch { /* ignore */ }
+      setOnboardingStep("complete");
+    }
+  }, [workflows.length, onboardingStep]);
+
   const [search, setSearch] = useState("");
   const debouncedSearch = useDebounced(search, 150);
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
@@ -226,6 +244,18 @@ export default function BrainPage() {
             Every workflow Flowithm has captured. Search, filter, and review.
           </p>
         </div>
+
+        {onboardingStep && onboardingStep !== "complete" && (
+          <OnboardingBanner
+            step={onboardingStep}
+            onDismiss={() => {
+              try {
+                window.localStorage.setItem("flowithm_onboarding_step", "complete");
+              } catch { /* ignore */ }
+              setOnboardingStep("complete");
+            }}
+          />
+        )}
 
         <MetricsRow
           workflows={workflows}
@@ -492,6 +522,49 @@ function CountUp({ value, suffix = "" }: { value: number; suffix?: string }) {
       {display}
       {suffix}
     </span>
+  );
+}
+
+// --------------------------------------------------------------------------
+// Onboarding banner (shown until localStorage.flowithm_onboarding_step === 'complete')
+// --------------------------------------------------------------------------
+
+function OnboardingBanner({
+  step,
+  onDismiss,
+}: {
+  step: string;
+  onDismiss: () => void;
+}) {
+  // Resume URL depends on where the user left off in the flow.
+  const continueHref = step === "setup"
+    ? "/setup"
+    : step === "connect"
+      ? "/onboarding/connect"
+      : "/onboarding/generate";
+  return (
+    <div className="mb-8 flex items-center justify-between gap-4 rounded-xl border border-[#1D9E75]/30 bg-[#1D9E75]/10 px-4 py-3 text-sm text-zinc-200">
+      <div>
+        <strong className="font-medium text-zinc-100">Finish setting up Flowithm</strong>
+        <span className="ml-2 text-zinc-400">
+          — connect a source to start auto-ingesting your company knowledge.
+        </span>
+      </div>
+      <div className="flex shrink-0 items-center gap-2">
+        <Link
+          href={continueHref}
+          className="rounded-md bg-[#1D9E75] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#178c66] transition-colors"
+        >
+          Continue setup →
+        </Link>
+        <button
+          onClick={onDismiss}
+          className="text-xs text-zinc-400 hover:text-zinc-200 transition-colors"
+        >
+          Dismiss
+        </button>
+      </div>
+    </div>
   );
 }
 

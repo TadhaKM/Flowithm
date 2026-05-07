@@ -132,12 +132,14 @@ Brand colour `#1D9E75` (teal); dark theme using zinc neutrals.
 | Route | Purpose |
 |---|---|
 | `/` | Workflow generator. Paste source material, name it, click Generate → calls `/workflows/generate`. Two-panel output (workflow + skills file JSON). Recent workflows row at the bottom with *Clear all*. |
-| `/brain` | Knowledge-base dashboard. 5-card metric row (workflows, sources, last updated, last synced, **needs review**). Conflicts banner + section with severity-coded cards (two-column diff, Accept/Dismiss/Snooze). Workflow grid/list with search, source filter, sort, view toggle. Each workflow card has a kebab menu (Copy JSON, Mark as reviewed, Archive). |
+| `/brain` | Knowledge-base dashboard. 5-card metric row (workflows, sources, last updated, last synced, **needs review**). Conflicts banner + section with severity-coded cards (two-column diff, Accept/Dismiss/Snooze). Workflow grid/list with search, source filter, sort, view toggle. Each workflow card has a kebab menu (Copy JSON, Mark as reviewed, Archive). Onboarding banner appears at top while `localStorage.flowithm_onboarding_step !== 'complete'` — auto-completes the moment any workflow exists in the list. |
 | `/brain/[id]` | Workflow detail. Two-panel render. Header has Edit name / Re-extract / Mark as reviewed / Archive. **Staleness banner** above the panels when `needs_review` is true. |
 | `/brain/api` | Agent API tab. Keys management (table + two-click revoke + new-key modal showing plaintext once with copy button). 30-day usage stats (cards + 14-day local-time SVG bar chart). Three integration snippets (TS / Python / Claude tool use) with the `needs_review` escalation pattern in each. Live `/skills/match` playground via server-side playground key with syntax-highlighted JSON response. |
 | `/brain/sources` | Connected-sources dashboard. Last-run banner with new-chunks / skipped / conflicts / staleness counts and inline-expandable error logs. Per-source cards (type icon, name, active/paused toggle, last_synced, two-click Remove). + Connect source modal with per-type fields (Slack / Notion / **Gmail** / **Intercom** / GitHub). |
 | `/workflow/[id]` | Slack-bot deeplink target. Read-only two-panel render with Copy JSON. |
-| `/setup` | First-run organisation bootstrap. Renders when no `flowithm_org_id` cookie is present (middleware redirects). Submits `{company_name, user_name?}` to `/api/setup`, which creates the org and sets the httpOnly cookie. Single-tenant deploys can skip the gate by setting `FLOWITHM_DEFAULT_ORG_ID` in the dashboard env. |
+| `/setup` | First-run organisation bootstrap (step 1 of 3). Renders when no `flowithm_org_id` cookie is present (middleware redirects). Submits `{company_name, user_name?}` to `/api/setup` which creates the org and sets the httpOnly cookie. After success, advances to `/onboarding/connect` and stamps `localStorage.flowithm_onboarding_step='connect'`. Single-tenant deploys can skip the gate by setting `FLOWITHM_DEFAULT_ORG_ID`. |
+| `/onboarding/connect` | Step 2. 2x2 grid of source cards (Slack / Notion / Gmail / Manual paste). Slack/Notion/Gmail expand inline to their config form; on submit, POSTs to `/api/admin/sources` then advances to `/onboarding/generate?source=<type>`. Manual paste skips OAuth and jumps directly to step 3. |
+| `/onboarding/generate` | Step 3. If `?source=manual`, shows a textarea pre-filled with sample material. Otherwise shows three suggested-process chips (per source type) that pre-fill the process_name field, plus a textarea for the user to paste a representative thread/page. On generate success, fires CSS confetti, marks `localStorage.flowithm_onboarding_step='complete'`, and offers View dashboard / Generate another. |
 
 ### Server-only proxy routes (`ui/app/api/`)
 
@@ -158,6 +160,7 @@ goes through a Next.js route that injects the secret AND the
 - `/api/admin/playground` — GET → FastAPI `/api/v1/skills/match` (with `FLOWITHM_PLAYGROUND_KEY`); the playground key carries its own org_id
 - `/api/admin/sources` + `[id]` — CRUD proxies for `/sources`
 - `/api/admin/ingest` — GET status + POST trigger
+- `/api/admin/workflows/generate` — POST → FastAPI `/workflows/generate` (used by onboarding step 3)
 
 `ui/middleware.ts` redirects every non-API page to `/setup` when no
 `flowithm_org_id` cookie is present (and `FLOWITHM_DEFAULT_ORG_ID` env
@@ -367,6 +370,7 @@ authoritative; full message bodies via `git show <hash>`.
 | `3540708` | Anthropic retry wrapper + circuit breaker (`brain/anthropic_client.py`); every direct `messages.create` call swapped to `messages_create()` (commit 2 of 3) |
 | `3835def` | Real `/health` probe (Supabase + Anthropic + Voyage + scheduler + circuit-breaker checks) + `APP_VERSION` env (commit 3 of 3) |
 | `8e0af1c` | Production deployment: Dockerfile + railway.json + ui/vercel.json + .dockerignore + DEPLOYMENT.md + CORS lockdown via `FRONTEND_URL` |
+| _(next)_ | First-run onboarding flow: `/onboarding/connect` source picker + `/onboarding/generate` first-workflow page (with CSS confetti) + onboarding banner on `/brain` + step indicator + middleware whitelist for `/onboarding/*` |
 
 ---
 

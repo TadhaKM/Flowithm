@@ -13,13 +13,24 @@ const COOKIE = "flowithm_org_id";
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
-  // Bypass: setup page, API routes, Next internals.
+  // Bypass: setup page, the post-setup onboarding pages, API routes,
+  // and Next internals. Onboarding pages still require the org cookie
+  // (they're step 2/3 of the flow) — that gate is enforced below by
+  // looking for the cookie on every non-bypassed path.
   if (
     pathname.startsWith("/setup")
+    || pathname.startsWith("/onboarding/")
     || pathname.startsWith("/api/")
     || pathname.startsWith("/_next/")
     || pathname === "/favicon.ico"
   ) {
+    // /onboarding/* still needs the org cookie. If absent, fall back
+    // to /setup so the user starts at step 1.
+    if (pathname.startsWith("/onboarding/") && !req.cookies.get(COOKIE) && !HAS_DEFAULT_ORG) {
+      const url = req.nextUrl.clone();
+      url.pathname = "/setup";
+      return NextResponse.redirect(url);
+    }
     return NextResponse.next();
   }
 
