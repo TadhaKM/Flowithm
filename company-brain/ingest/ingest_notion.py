@@ -1,13 +1,20 @@
-"""Ingest notion_pages.md into Chunks.
+"""Ingest Notion pages → Chunks.
 
-Splits the file into sections at H1 and H2 boundaries (H3+ stay inside their
-parent section). Each section becomes one chunk; oversized sections are
-truncated via cap_tokens.
+Two modes:
+  Demo:  NotionIngestor().build_chunks(markdown_string)
+  Live:  NotionIngestor(token=..., page_ids=[...], since=datetime).process(None)
+
+Live mode is currently a stub — connect a Notion integration token and
+implement _fetch_via_api() against the Notion REST API
+(GET /v1/blocks/{id}/children, recursive block-tree → markdown).
 """
+from __future__ import annotations
+
 import json
 import re
 import sys
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 
 from brain.ingestors import BaseIngestor, Chunk
@@ -45,7 +52,31 @@ def parse_sections(text: str) -> list[dict]:
 
 
 class NotionIngestor(BaseIngestor):
-    def build_chunks(self, text: str) -> list[Chunk]:
+    """All constructor params optional — keeps the demo path test-friendly."""
+
+    def __init__(
+        self,
+        token: str | None = None,
+        page_ids: list[str] | None = None,
+        since: datetime | None = None,
+    ) -> None:
+        self.token = token
+        self.page_ids = page_ids or []
+        self.since = since
+
+    def build_chunks(self, text: str | None) -> list[Chunk]:
+        if text is None:
+            # Live mode requested by the scheduler. Not implemented yet —
+            # raise loudly so the cycle records it as an error in
+            # ingest_runs rather than silently producing no chunks.
+            if self.token or self.page_ids:
+                raise NotImplementedError(
+                    "Notion live fetch not implemented yet. "
+                    "Connect a Notion integration token and implement "
+                    "_fetch_via_api() against /v1/blocks/{id}/children."
+                )
+            return []
+
         chunks: list[Chunk] = []
         for s in parse_sections(text):
             body = cap_tokens(s["body"], self.MAX_CHUNK_TOKENS, strategy="truncate")

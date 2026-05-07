@@ -1,9 +1,23 @@
-"""Ingest slack_export.json into Chunks."""
+"""Ingest Slack messages → Chunks.
+
+Two modes:
+  Demo:  SlackIngestor().build_chunks(messages_loaded_from_json)
+  Live:  SlackIngestor(token=..., channel_ids=[...], since=datetime).process(None)
+
+Live mode hits Slack Web API conversations.history with `oldest=since.timestamp()`
+per channel, paginates, and pulls thread replies for any message that has a
+`thread_ts`. Falls back to demo behaviour when token is None.
+"""
+from __future__ import annotations
+
 import json
 import sys
+import time
 from collections import defaultdict
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from brain.chunker import chunk_text
 from brain.ingestors import BaseIngestor, Chunk
@@ -35,7 +49,29 @@ def format_message(m: dict) -> str:
 
 
 class SlackIngestor(BaseIngestor):
-    def build_chunks(self, messages: list[dict]) -> list[Chunk]:
+    """All constructor params optional — keeps the demo path test-friendly."""
+
+    def __init__(
+        self,
+        token: str | None = None,
+        channel_ids: list[str] | None = None,
+        since: datetime | None = None,
+    ) -> None:
+        self.token = token
+        self.channel_ids = channel_ids or []
+        self.since = since
+
+    def build_chunks(self, messages: list[dict] | None) -> list[Chunk]:
+        # Live mode: token + channel_ids set, messages was passed as None
+        # by the scheduler. Fetch first, then chunk.
+        if messages is None:
+            if not self.token or not self.channel_ids:
+                # No token AND no caller-provided messages — nothing to do.
+                # Treat as empty rather than raise, so an empty channel list
+                # in connected_sources doesn't sink the whole cycle.
+                return []
+            messages = self._fetch_via_api()
+
         chunks: list[Chunk] = []
         for thread in group_threads(messages):
             parent = thread[0]
@@ -58,6 +94,94 @@ class SlackIngestor(BaseIngestor):
                     metadata=dict(metadata),
                 ))
         return chunks
+
+    # ------------------------------------------------------------------
+    # Live API fetch — only imported when token is set.
+    # ------------------------------------------------------------------
+
+    def _fetch_via_api(self) -> list[dict]:
+        # Lazy import keeps slack_sdk optional for the demo + tests.
+        from slack_sdk.web import WebClient
+        from slack_sdk.errors import SlackApiError
+
+        client = WebClient(token=self.token)
+        oldest = f"{self.since.timestamp()}" if self.since else "0"
+
+        all_messages: list[dict] = []
+        for channel_id in self.channel_ids:
+            channel_name = self._resolve_channel_name(client, channel_id)
+            cursor: str | None = None
+            while True:
+                try:
+                    resp = client.conversations_history(
+                        channel=channel_id,
+                        oldest=oldest,
+                        limit=200,
+                        cursor=cursor,
+                    )
+                except SlackApiError as exc:
+                    raise RuntimeError(
+                        f"conversations.history failed for {channel_id}: {exc.response.get('error')}"
+                    ) from exc
+
+                for raw in resp.get("messages", []) or []:
+                    if raw.get("subtype") in {"channel_join", "channel_leave", "bot_message"}:
+                        continue
+                    all_messages.append(_normalise(raw, channel_name))
+                    # If the parent has replies, pull them too. We only call
+                    # conversations.replies for threads — saves API budget.
+                    if raw.get("reply_count") and raw.get("thread_ts") == raw.get("ts"):
+                        all_messages.extend(self._fetch_thread(client, channel_id, channel_name, raw["ts"]))
+
+                cursor = (resp.get("response_metadata") or {}).get("next_cursor")
+                if not cursor:
+                    break
+                # Be polite — Slack tier-2 limit is ~20 req/min for history.
+                time.sleep(0.5)
+        return all_messages
+
+    @staticmethod
+    def _fetch_thread(client: Any, channel_id: str, channel_name: str, thread_ts: str) -> list[dict]:
+        from slack_sdk.errors import SlackApiError
+
+        out: list[dict] = []
+        cursor: str | None = None
+        while True:
+            try:
+                resp = client.conversations_replies(
+                    channel=channel_id, ts=thread_ts, cursor=cursor, limit=200
+                )
+            except SlackApiError:
+                break
+            replies = resp.get("messages") or []
+            # Skip the first message — it's the parent we already captured.
+            for raw in replies[1:]:
+                out.append(_normalise(raw, channel_name))
+            cursor = (resp.get("response_metadata") or {}).get("next_cursor")
+            if not cursor:
+                break
+        return out
+
+    @staticmethod
+    def _resolve_channel_name(client: Any, channel_id: str) -> str:
+        from slack_sdk.errors import SlackApiError
+
+        try:
+            info = client.conversations_info(channel=channel_id)
+            return info.get("channel", {}).get("name") or channel_id
+        except SlackApiError:
+            return channel_id
+
+
+def _normalise(raw: dict, channel_name: str) -> dict:
+    """Coerce a Slack API message into the shape the existing chunker expects."""
+    return {
+        "channel": channel_name,
+        "user": raw.get("user") or raw.get("bot_id") or "unknown",
+        "ts": raw.get("ts") or "0",
+        "text": raw.get("text") or "",
+        **({"thread_ts": raw["thread_ts"]} if raw.get("thread_ts") else {}),
+    }
 
 
 def main() -> None:
