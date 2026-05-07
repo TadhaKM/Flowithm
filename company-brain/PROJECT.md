@@ -158,23 +158,24 @@ Postgres on Supabase, with `vector` (pgvector) and `pg_trgm` extensions.
 
 | Table | Purpose |
 |---|---|
-| `chunks` | One row per embedded text chunk. `embedding vector(1024)` (Voyage `voyage-3`). `content_hash` SHA-256 unique index dedups re-ingested content. |
-| `skills` | Generated workflow records. `summary_embedding vector(1024)` powers `/api/v1/skills/match`. `version` + `previous_version_id` track drift accepts. `needs_review` + `needs_review_reason` + `stale_flagged_at` for staleness. `archived` + `archived_at` for soft-delete. |
-| `conflicts` | Drift records — contradiction / update / expansion / deprecation. Status: unresolved / accepted / dismissed / snoozed. `resolved_by` + `resolved_at` + `snoozed_until`. |
-| `api_keys` | Public agent API auth. `key_hash` (bcrypt), `key_prefix` (indexed for candidate lookup), `request_count`, `last_used_at`, `is_active`. |
+| `organisations` | Multi-tenancy root. Every domain row references this. Bootstrap seeds a default row at UUID `00000000-0000-0000-0000-000000000001` for self-hosted single-tenant deploys. |
+| `chunks` | One row per embedded text chunk. `embedding vector(1024)` (Voyage `voyage-3`). `content_hash` SHA-256 unique index dedups re-ingested content. `org_id` ties to `organisations`. |
+| `skills` | Generated workflow records. `summary_embedding vector(1024)` powers `/api/v1/skills/match`. `version` + `previous_version_id` track drift accepts. `needs_review` + `needs_review_reason` + `stale_flagged_at` for staleness. `archived` + `archived_at` for soft-delete. `org_id` ties to `organisations`. |
+| `conflicts` | Drift records — contradiction / update / expansion / deprecation. Status: unresolved / accepted / dismissed / snoozed. `resolved_by` + `resolved_at` + `snoozed_until`. `org_id`. |
+| `api_keys` | Public agent API auth. `key_hash` (bcrypt), `key_prefix` (indexed for candidate lookup), `request_count`, `last_used_at`, `is_active`. `org_id` resolved at auth time and propagated to every downstream query. |
 | `api_requests` | Per-call audit log written from BackgroundTasks. Includes endpoint, query, matched_skill_id, response_time_ms. |
-| `executions` | Agent feedback loop — `outcome ∈ {completed, escalated, exception_triggered}` + optional `exception_note` (triggers a drift check via Claude judgement). |
-| `connected_sources` | Per-tenant ingest source configs. `source_type` + jsonb `config` (tokens stored server-side; redacted in API responses). |
-| `ingest_runs` | One row per scheduled or manual run. `new_chunks`, `skipped_chunks`, `new_conflicts`, `stale_flagged`, `stale_cleared`, `errors` jsonb array. |
-| `ingest_lock` | Singleton row-mutex. `try_acquire_ingest_lock(holder)` / `release_ingest_lock()`. 15-min stale-lock timeout for self-healing. |
+| `executions` | Agent feedback loop — `outcome ∈ {completed, escalated, exception_triggered}` + optional `exception_note` (triggers a drift check via Claude judgement). `org_id`. |
+| `connected_sources` | Per-tenant ingest source configs. `source_type` + jsonb `config` (tokens stored server-side; redacted in API responses). `org_id`. |
+| `ingest_runs` | One row per scheduled or manual run. `new_chunks`, `skipped_chunks`, `new_conflicts`, `stale_flagged`, `stale_cleared`, `errors` jsonb array. `org_id`. |
+| `ingest_lock` | Singleton row-mutex. `try_acquire_ingest_lock(holder)` / `release_ingest_lock()`. 15-min stale-lock timeout for self-healing. **Global** — not per-org. |
 
 ### RPC functions
 
 | Function | Used by |
 |---|---|
-| `match_chunks(query_embedding, match_count)` | `query_brain` (RAG Q&A) |
-| `match_skills(query_embedding, match_count)` | `/api/v1/skills/match` (returns `needs_review` + `needs_review_reason`) |
-| `find_similar_workflow(q_name, min_sim, exclude_id)` | Slack bot's "Update existing" detection; `get_skill_by_name_fuzzy` |
+| `match_chunks(query_embedding, match_count, target_org_id)` | `query_brain` (RAG Q&A); `target_org_id` filters per tenant |
+| `match_skills(query_embedding, match_count, target_org_id)` | `/api/v1/skills/match` (returns `needs_review` + `needs_review_reason`) |
+| `find_similar_workflow(q_name, min_sim, exclude_id, target_org_id)` | Slack bot's "Update existing" detection; `get_skill_by_name_fuzzy` |
 | `increment_api_key_usage(key_id)` | Per-request atomic counter bump |
 | `try_acquire_ingest_lock(holder)` / `release_ingest_lock()` | Multi-worker mutex around `run_ingest_cycle` |
 
@@ -284,6 +285,7 @@ proxy times round-trip itself).
 | `INGEST_SCHEDULE_HOURS` | `24` | Scheduler cadence. |
 | `STALE_THRESHOLD_DAYS` | `90` | Threshold for `run_staleness_check`. Read at call time. |
 | `GOOGLE_CLIENT_SECRET_PATH` | `client_secret.json` | One-shot Gmail OAuth bootstrap only. |
+| `ORG_ID` | `00000000-0000-0000-0000-000000000001` | Default tenant for self-hosted single-org deploys. Used as a fallback when no `X-Org-ID` header is present. Matches the seed row in `schema.sql`. |
 
 ### `ui/.env.local` (Next.js side)
 
@@ -339,6 +341,8 @@ authoritative; full message bodies via `git show <hash>`.
 | `b53ab63` | Add Gmail and Intercom ingestors + scheduler dispatch + API validation |
 | `7d75deb` | Connect-source modal: Gmail + Intercom field configurations + README docs |
 | `66b31e9` | Note Gmail label-quoting follow-up as a TODO |
+| `3e6d8e0` | Add PROJECT.md — comprehensive project reference |
+| _(next)_ | Multi-tenancy schema: `organisations` table + `org_id` columns + backfill + RLS enable + RPC `target_org_id` filter (commit 1 of 3) |
 
 ---
 

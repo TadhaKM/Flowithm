@@ -1,5 +1,30 @@
--- Company Brain — Supabase schema
--- Run this once in the Supabase SQL editor (or via `psql`) to provision the database.
+-- Flowithm — Supabase schema
+-- Run this once in the Supabase SQL editor (or via `psql`) to provision the
+-- database. Re-runnable: every CREATE / ALTER is idempotent.
+
+-- ---------------------------------------------------------------------------
+-- organisations (multi-tenancy root)
+-- ---------------------------------------------------------------------------
+-- Every domain row is owned by exactly one organisation. RLS is enabled on
+-- the major tables but no policies are defined yet — the FastAPI service
+-- role bypasses RLS and we enforce org_id filtering in application code.
+-- TODO before public launch: add RLS policies that scope reads/writes to
+-- a session-set org_id and switch FastAPI to use anon + JWT instead of the
+-- service role key.
+create table if not exists organisations (
+    id          uuid          primary key default gen_random_uuid(),
+    name        text          not null,
+    slug        text          not null unique,
+    plan        text          not null default 'free' check (plan in ('free', 'pro', 'enterprise')),
+    created_at  timestamptz   not null default now()
+);
+
+-- Bootstrap a default organisation with a fixed UUID. Single-tenant /
+-- self-hosted deploys point ORG_ID at this row in their .env, and existing
+-- pre-multi-tenancy rows get backfilled to it below.
+insert into organisations (id, name, slug, plan)
+values ('00000000-0000-0000-0000-000000000001'::uuid, 'Default', 'default', 'free')
+on conflict (id) do nothing;
 
 -- ---------------------------------------------------------------------------
 -- Extensions
@@ -362,7 +387,8 @@ create index if not exists skills_summary_embedding_idx
 -- API's /api/v1/skills/match endpoint.
 create or replace function match_skills(
     query_embedding vector(1024),
-    match_count     int
+    match_count     int,
+    target_org_id   uuid default null
 )
 returns table (
     id                  uuid,
@@ -403,9 +429,49 @@ as $$
     from skills s
     where s.archived = false
       and s.summary_embedding is not null
+      and (target_org_id is null or s.org_id = target_org_id)
     order by s.summary_embedding <=> query_embedding
     limit match_count;
 $$;
+
+
+-- ---------------------------------------------------------------------------
+-- Multi-tenancy: org_id columns + backfill + indexes + RLS enable
+-- ---------------------------------------------------------------------------
+-- Every domain row gets an org_id. Nullable here so the ALTERs are safe to
+-- re-run; the backfill below points every existing row at the default org.
+alter table skills            add column if not exists org_id uuid references organisations(id);
+alter table chunks            add column if not exists org_id uuid references organisations(id);
+alter table conflicts         add column if not exists org_id uuid references organisations(id);
+alter table connected_sources add column if not exists org_id uuid references organisations(id);
+alter table api_keys          add column if not exists org_id uuid references organisations(id);
+alter table ingest_runs       add column if not exists org_id uuid references organisations(id);
+alter table executions        add column if not exists org_id uuid references organisations(id);
+
+-- Backfill any pre-multi-tenancy rows to the default org so the org-aware
+-- application code keeps surfacing them.
+update skills            set org_id = '00000000-0000-0000-0000-000000000001'::uuid where org_id is null;
+update chunks            set org_id = '00000000-0000-0000-0000-000000000001'::uuid where org_id is null;
+update conflicts         set org_id = '00000000-0000-0000-0000-000000000001'::uuid where org_id is null;
+update connected_sources set org_id = '00000000-0000-0000-0000-000000000001'::uuid where org_id is null;
+update api_keys          set org_id = '00000000-0000-0000-0000-000000000001'::uuid where org_id is null;
+update ingest_runs       set org_id = '00000000-0000-0000-0000-000000000001'::uuid where org_id is null;
+update executions        set org_id = '00000000-0000-0000-0000-000000000001'::uuid where org_id is null;
+
+create index if not exists skills_org_idx            on skills (org_id);
+create index if not exists chunks_org_idx            on chunks (org_id);
+create index if not exists conflicts_org_idx         on conflicts (org_id);
+create index if not exists connected_sources_org_idx on connected_sources (org_id);
+create index if not exists api_keys_org_idx          on api_keys (org_id);
+create index if not exists ingest_runs_org_idx       on ingest_runs (org_id);
+
+-- RLS enabled with no policies — service role bypasses, anon role gets
+-- nothing. Policies coming pre-launch (see TODO at top of file).
+alter table skills            enable row level security;
+alter table chunks            enable row level security;
+alter table conflicts         enable row level security;
+alter table connected_sources enable row level security;
+alter table api_keys          enable row level security;
 
 
 -- ---------------------------------------------------------------------------
@@ -451,7 +517,8 @@ create index if not exists chunks_source_name_idx on chunks (source_name);
 --     slower query. 10 is a sensible default for lists = 100.
 create or replace function match_chunks(
     query_embedding vector(1024),
-    match_count     int
+    match_count     int,
+    target_org_id   uuid default null
 )
 returns table (
     id          uuid,
@@ -473,6 +540,7 @@ as $$
         1 - (c.embedding <=> query_embedding) as similarity
     from chunks c
     where c.embedding is not null
+      and (target_org_id is null or c.org_id = target_org_id)
     order by c.embedding <=> query_embedding
     limit match_count;
 $$;
@@ -489,9 +557,10 @@ $$;
 -- min_sim of 0.4 catches "Customer refund handling" matching "Refund flow"
 -- without overmatching unrelated phrases. Tune empirically.
 create or replace function find_similar_workflow(
-    q_name      text,
-    min_sim     float default 0.4,
-    exclude_id  text  default ''
+    q_name        text,
+    min_sim       float default 0.4,
+    exclude_id    text  default '',
+    target_org_id uuid  default null
 )
 returns table (
     id              uuid,
@@ -532,6 +601,7 @@ as $$
     from skills s
     where s.archived = false
       and (exclude_id = '' or s.id::text <> exclude_id)
+      and (target_org_id is null or s.org_id = target_org_id)
       and similarity(s.process_name, q_name) >= min_sim
     order by similarity(s.process_name, q_name) desc
     limit 1;
