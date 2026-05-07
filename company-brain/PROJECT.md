@@ -73,10 +73,10 @@ is the scheduler-driven ingestor that **fetches** message history.
 | `chunker.py` | `chunk_text()` — splits a long string into overlapping ~600-token chunks. Pulls its encoder from `text_utils` so there's exactly one cl100k_base instance. |
 | `ingestors.py` | `BaseIngestor` ABC + `Chunk` dataclass shared by every concrete ingestor. `process()` does build → validate → log filtering; `validate()` drops short or null-source chunks. |
 | `embedder.py` | Voyage `voyage-3` embeddings + Supabase chunk storage. Public surface: `get_embedding`, `get_embeddings_batch`, `chunk_exists`, `store_chunk`, `embed_and_store`, `embed_query`. SHA-256 dedup on `chunks.content_hash`. |
-| `store.py` | Every Supabase read/write outside of the embedder. Skills, conflicts, api_keys, api_requests, executions, connected_sources, ingest_runs. `_row_to_workflow()` is the canonical DB-row → JSON shape mapper. |
+| `store.py` | Every Supabase read/write outside of the embedder. Skills, conflicts, api_keys, api_requests, executions, connected_sources, ingest_runs, **organisations**. `_row_to_workflow()` is the canonical DB-row → JSON shape mapper. Every helper accepts an optional `org_id: str \| None`; `_default_org_id()` falls back to the `ORG_ID` env so existing callers keep working. |
 | `query.py` | Claude generation: `query_brain()` (RAG Q&A), `generate_skills_file()` (skill JSON from chunks), `generate_workflow_from_text()` (skill JSON from pasted text). After every `generate_workflow_from_text`, embeds the result's summary text and schedules a drift check. |
 | `drift.py` | Two entry points: `check_for_drift(content, new_skill)` for newly-generated workflows; `check_chunks_against_skills(chunks)` for incoming raw content. `resolve_conflict(id, action)` handles `accept` (rewrites + versions + cascades siblings), `dismiss`, `snooze`. `get_unresolved_conflicts` + `get_conflict_history` feed the UI. |
-| `scheduler.py` | `IngestionScheduler` singleton driven by APScheduler. `run_ingest_cycle` walks every active source, fetches incrementally, dedups, drift-checks, then runs the staleness pass. Wrapped in a row-mutex so multi-worker uvicorn deployments can't race. |
+| `scheduler.py` | `IngestionScheduler` singleton driven by APScheduler. `run_ingest_cycle` groups every active source by `org_id` and runs an independent sub-cycle per organisation: fetch → embed → drift → staleness → write `ingest_runs` row. Wrapped in a row-mutex so multi-worker uvicorn deployments can't race. |
 | `staleness.py` | `run_staleness_check()` flags skills older than `STALE_THRESHOLD_DAYS` without recent review; `mark_as_reviewed(id)` clears the flag and bumps `reviewed_at`. |
 | `backfill_embeddings.py` | One-shot CLI: embeds every existing skill row missing a `summary_embedding`. Idempotent. |
 | `test_drift.py` | Manual verification script (NOT pytest). Round-trips drift end-to-end against live Supabase + Anthropic. |
@@ -104,7 +104,8 @@ args for the demo path, and accepts source-specific live-mode params
 |---|---|
 | `main.py` | Internal FastAPI app. Lifespan starts/stops the scheduler. Routes for `/query`, `/skills`, `/workflows/{generate,similar,id,id/archive}`, `/history`, `/conflicts`, `/skills/{id}/conflicts`, `/skills/{id}/review`, `/ingest/{status,trigger}`, `/sources` CRUD, `/demo/{slug}`, `/health`. |
 | `agent.py` | Public agent API mounted at `/api/v1`. Sub-app with its own OpenAPI at `/api/v1/openapi.json` and Swagger UI at `/api/v1/docs`. Endpoints: `POST/GET /keys`, `DELETE /keys/{id}` (admin-gated), `GET /skills`, `GET /skills/{name}`, `GET /skills/match`, `POST /skills/execute`. Standard `{error, code, docs}` envelope on every error. |
-| `auth.py` | `verify_api_key` FastAPI dependency: Bearer extraction → prefix-indexed candidate lookup → bcrypt verify → active check → 100/min sliding-window rate limit → BackgroundTask audit log. `verify_admin_token` for the key-management endpoints. |
+| `auth.py` | `verify_api_key` FastAPI dependency: Bearer extraction → prefix-indexed candidate lookup (cross-org) → bcrypt verify → active check → 100/min sliding-window rate limit → BackgroundTask audit log. The matched key's `org_id` lands on `request.state.org_id` for downstream use. `verify_admin_token` for the key-management endpoints. |
+| `main.py` `get_org_id(request)` | Resolves the request's tenant: `X-Org-ID` header → `ORG_ID` env → seed default UUID. Wired as `_OrgDep` on every internal endpoint that touches a tenant-scoped table. |
 
 ### `slack/`
 
@@ -342,7 +343,8 @@ authoritative; full message bodies via `git show <hash>`.
 | `7d75deb` | Connect-source modal: Gmail + Intercom field configurations + README docs |
 | `66b31e9` | Note Gmail label-quoting follow-up as a TODO |
 | `3e6d8e0` | Add PROJECT.md — comprehensive project reference |
-| _(next)_ | Multi-tenancy schema: `organisations` table + `org_id` columns + backfill + RLS enable + RPC `target_org_id` filter (commit 1 of 3) |
+| `813fe4b` | Multi-tenancy schema: `organisations` table + `org_id` columns + backfill + RLS enable + RPC `target_org_id` filter (commit 1 of 3) |
+| _(next)_ | Multi-tenancy backend wiring: every store helper takes `org_id`, scheduler runs per-org, auth extracts org from API key, `POST /setup` endpoint, `X-Org-ID` header on Slack bot calls (commit 2 of 3) |
 
 ---
 

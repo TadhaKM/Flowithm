@@ -197,7 +197,11 @@ def _strip_for_llm(skill: dict[str, Any]) -> dict[str, Any]:
 # Public: check
 # ---------------------------------------------------------------------------
 
-def check_for_drift(new_content: str, new_skill: dict[str, Any]) -> list[dict[str, Any]]:
+def check_for_drift(
+    new_content: str,
+    new_skill: dict[str, Any],
+    org_id: str | None = None,
+) -> list[dict[str, Any]]:
     """Run the consistency check; persist any conflicts; return the inserted rows.
 
     Always non-raising — failures are logged and yield an empty list so
@@ -205,6 +209,9 @@ def check_for_drift(new_content: str, new_skill: dict[str, Any]) -> list[dict[st
     Supabase or Anthropic issues.
     """
     try:
+        from brain.store import _default_org_id
+
+        org = org_id or _default_org_id()
         client = get_client()
         new_skill_id = new_skill.get("id")
 
@@ -212,6 +219,7 @@ def check_for_drift(new_content: str, new_skill: dict[str, Any]) -> list[dict[st
             client.table(SKILLS_TABLE)
             .select("*")
             .eq("archived", False)
+            .eq("org_id", org)
             .execute()
         )
         skills_rows = [r for r in (result.data or []) if str(r.get("id")) != str(new_skill_id or "")]
@@ -276,6 +284,7 @@ def check_for_drift(new_content: str, new_skill: dict[str, Any]) -> list[dict[st
                 "new_evidence": c.get("new_evidence") or "",
                 "suggested_update": c.get("suggested_update") or "",
                 "severity": c.get("severity") or "medium",
+                "org_id": org,
             })
 
         if not rows:
@@ -325,7 +334,7 @@ CHUNK_TOP_K_CANDIDATES = 2          # ask Claude about the top-N most similar sk
 CHUNK_DRIFT_PREVIEW_CHARS = 1500    # cap chunk length sent to the LLM
 
 
-def check_chunks_against_skills(chunks: list) -> list[dict[str, Any]]:
+def check_chunks_against_skills(chunks: list, org_id: str | None = None) -> list[dict[str, Any]]:
     """Per-chunk drift check against existing non-archived skills.
 
     For each incoming chunk:
@@ -343,11 +352,15 @@ def check_chunks_against_skills(chunks: list) -> list[dict[str, Any]]:
         return []
 
     try:
+        from brain.store import _default_org_id
+
+        org = org_id or _default_org_id()
         client = get_client()
         sk_resp = (
             client.table(SKILLS_TABLE)
             .select("id,process_name,description,process_trigger,steps,decision_rules,approvals,exceptions,sources,summary_embedding")
             .eq("archived", False)
+            .eq("org_id", org)
             .not_.is_("summary_embedding", "null")
             .execute()
         )
@@ -391,6 +404,7 @@ def check_chunks_against_skills(chunks: list) -> list[dict[str, Any]]:
                     "new_evidence": hit.get("new_evidence") or _chunk_content(chunk)[:240],
                     "suggested_update": hit.get("suggested_update") or "",
                     "severity": hit.get("severity") or "medium",
+                    "org_id": org,
                 }
                 try:
                     ins = client.table(CONFLICTS_TABLE).insert(row).execute()
@@ -464,11 +478,13 @@ def _check_chunk_against_skill(
         return None
 
 
-def schedule_drift_check(new_content: str, new_skill: dict[str, Any]) -> None:
+def schedule_drift_check(
+    new_content: str, new_skill: dict[str, Any], org_id: str | None = None
+) -> None:
     """Fire-and-forget: run check_for_drift in a daemon thread."""
     def _worker():
         try:
-            check_for_drift(new_content, new_skill)
+            check_for_drift(new_content, new_skill, org_id=org_id)
         except Exception as exc:
             print(f"[drift] background check failed: {exc}", flush=True)
     threading.Thread(target=_worker, daemon=True).start()
@@ -478,18 +494,19 @@ def schedule_drift_check(new_content: str, new_skill: dict[str, Any]) -> None:
 # Public: list / history
 # ---------------------------------------------------------------------------
 
-def get_unresolved_conflicts(include_snoozed: bool = False) -> list[dict[str, Any]]:
-    """Conflicts still needing a decision.
+def get_unresolved_conflicts(
+    include_snoozed: bool = False, org_id: str | None = None
+) -> list[dict[str, Any]]:
+    """Conflicts still needing a decision (scoped to current org)."""
+    from brain.store import _default_org_id
 
-    `include_snoozed=True` returns 'unresolved' + every 'snoozed' row.
-    Default behaviour also surfaces 'snoozed' rows whose snoozed_until has
-    already passed (they're actionable again).
-    """
+    org = org_id or _default_org_id()
     client = get_client()
     if include_snoozed:
         rows = (
             client.table(CONFLICTS_TABLE)
             .select("*")
+            .eq("org_id", org)
             .in_("status", ["unresolved", "snoozed"])
             .order("created_at", desc=True)
             .execute()
@@ -498,6 +515,7 @@ def get_unresolved_conflicts(include_snoozed: bool = False) -> list[dict[str, An
         unresolved = (
             client.table(CONFLICTS_TABLE)
             .select("*")
+            .eq("org_id", org)
             .eq("status", "unresolved")
             .order("created_at", desc=True)
             .execute()
@@ -505,6 +523,7 @@ def get_unresolved_conflicts(include_snoozed: bool = False) -> list[dict[str, An
         snoozed_expired = (
             client.table(CONFLICTS_TABLE)
             .select("*")
+            .eq("org_id", org)
             .eq("status", "snoozed")
             .lt("snoozed_until", _now_iso())
             .order("created_at", desc=True)
@@ -522,13 +541,16 @@ def get_unresolved_conflicts(include_snoozed: bool = False) -> list[dict[str, An
     return rows
 
 
-def get_conflict_history(skill_id: str) -> list[dict[str, Any]]:
+def get_conflict_history(skill_id: str, org_id: str | None = None) -> list[dict[str, Any]]:
     """Every conflict (any status) for a given skill_id, newest first."""
+    from brain.store import _default_org_id
+
     client = get_client()
     result = (
         client.table(CONFLICTS_TABLE)
         .select("*")
         .eq("existing_skill_id", skill_id)
+        .eq("org_id", org_id or _default_org_id())
         .order("created_at", desc=True)
         .execute()
     )
@@ -571,7 +593,9 @@ def _hydrate_skill_meta(client, rows: list[dict[str, Any]]) -> None:
 # Public: resolve
 # ---------------------------------------------------------------------------
 
-def resolve_conflict(conflict_id: str, action: str, resolved_by: str) -> dict[str, Any]:
+def resolve_conflict(
+    conflict_id: str, action: str, resolved_by: str, org_id: str | None = None
+) -> dict[str, Any]:
     """Apply 'accept' | 'dismiss' | 'snooze' to a conflict.
 
     accept   -> Claude rewrites the existing skill per suggested_update,
@@ -585,11 +609,15 @@ def resolve_conflict(conflict_id: str, action: str, resolved_by: str) -> dict[st
     if action not in {"accept", "dismiss", "snooze"}:
         raise ValueError(f"unknown action: {action!r}")
 
+    from brain.store import _default_org_id
+
+    org = org_id or _default_org_id()
     client = get_client()
     fetched = (
         client.table(CONFLICTS_TABLE)
         .select("*")
         .eq("id", conflict_id)
+        .eq("org_id", org)
         .limit(1)
         .execute()
     )
@@ -641,6 +669,7 @@ def resolve_conflict(conflict_id: str, action: str, resolved_by: str) -> dict[st
         source=old_skill.get("source") or "manual",
         source_metadata=old_skill.get("source_metadata") or {},
         raw_text=old_skill.get("raw_text") or "",
+        org_id=org,
     )
     new_version = int(old_skill.get("version") or 1) + 1
     client.table(SKILLS_TABLE).update({

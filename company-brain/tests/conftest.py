@@ -24,3 +24,6 @@ os.environ.setdefault("ANTHROPIC_API_KEY", "test-anthropic-key")
 os.environ.setdefault("VOYAGE_API_KEY", "test-voyage-key")
 os.environ.setdefault("SUPABASE_URL", "https://test.supabase.co")
 os.environ.setdefault("SUPABASE_SERVICE_KEY", "test-supabase-key")
+# Multi-tenancy default org — matches the seed UUID in brain/schema.sql so
+# helpers that fall back to _default_org_id() in tests resolve cleanly.
+os.environ.setdefault("ORG_ID", "00000000-0000-0000-0000-000000000001")

@@ -96,6 +96,10 @@ def _code_for_status(status: int) -> str:
 
 class CreateKeyRequest(BaseModel):
     name: str = Field(..., min_length=1, description="Human label, e.g. 'Production support bot'.")
+    org_id: str | None = Field(
+        default=None,
+        description="Organisation this key belongs to. Defaults to the ORG_ID env (single-tenant fallback).",
+    )
 
 
 class CreateKeyResponse(BaseModel):
@@ -132,7 +136,7 @@ def create_api_key(req: CreateKeyRequest, _admin=AdminTokenDep) -> dict[str, Any
     prefix = plaintext[:KEY_PREFIX_LEN]
     hashed = bcrypt.hashpw(plaintext.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
-    row = insert_api_key(req.name, prefix, hashed)
+    row = insert_api_key(req.name, prefix, hashed, org_id=req.org_id or None)
     print(
         f"[agent-api] new API key issued: {prefix}... "
         f"(name={req.name!r}, id={row.get('id')}). "
@@ -156,8 +160,9 @@ def create_api_key(req: CreateKeyRequest, _admin=AdminTokenDep) -> dict[str, Any
         "Returns every key (active and revoked). Plaintext is never included."
     ),
 )
-def list_keys(_admin=AdminTokenDep) -> list[dict[str, Any]]:
-    return list_api_keys()
+def list_keys(request: Request, _admin=AdminTokenDep) -> list[dict[str, Any]]:
+    org = request.headers.get("x-org-id") or None
+    return list_api_keys(org_id=org)
 
 
 @agent_app.delete(
@@ -168,8 +173,9 @@ def list_keys(_admin=AdminTokenDep) -> list[dict[str, Any]]:
         "Soft-delete: sets is_active=false. Subsequent auth attempts return 401 REVOKED_API_KEY."
     ),
 )
-def revoke_key(key_id: str, _admin=AdminTokenDep) -> dict[str, Any]:
-    ok = deactivate_api_key(key_id)
+def revoke_key(key_id: str, request: Request, _admin=AdminTokenDep) -> dict[str, Any]:
+    org = request.headers.get("x-org-id") or None
+    ok = deactivate_api_key(key_id, org_id=org)
     if not ok:
         raise _err(404, "INVALID_REQUEST", f"API key not found: {key_id}")
     return {"status": "ok", "revoked": key_id}
@@ -242,6 +248,7 @@ def list_skills_endpoint(
         needs_review=needs_review,
         limit=limit,
         offset=offset,
+        org_id=getattr(request.state, "org_id", None) or None,
     )
     return {"skills": rows, "total": total}
 
@@ -290,12 +297,13 @@ def match_skill_endpoint(
     q: str = Query(..., min_length=2, description="Natural-language description of the situation."),
 ) -> dict[str, Any]:
     started = time.perf_counter()
+    org_id = getattr(request.state, "org_id", None) or None
     try:
         embedding = get_embedding(q)
     except ValueError:
         raise _err(400, "INVALID_REQUEST", "Query text is empty.")
 
-    matches = match_skills_by_embedding(embedding, k=3)
+    matches = match_skills_by_embedding(embedding, k=3, org_id=org_id)
     if not matches:
         log_match_request(background, request, q, None)
         raise _err(
@@ -354,7 +362,8 @@ def get_skill_endpoint(
     request: Request,
     api_key=ApiKeyDep,
 ) -> dict[str, Any]:
-    skill, closest = get_skill_by_name_fuzzy(process_name)
+    org_id = getattr(request.state, "org_id", None) or None
+    skill, closest = get_skill_by_name_fuzzy(process_name, org_id=org_id)
     if skill:
         return _workflow_to_agent_skill(skill)
     raise _err(
@@ -390,12 +399,14 @@ def execute_skill_endpoint(
     if body.outcome not in {"completed", "escalated", "exception_triggered"}:
         raise _err(400, "INVALID_REQUEST", f"unknown outcome: {body.outcome!r}")
 
+    org_id = getattr(request.state, "org_id", None) or None
     execution_id = insert_execution(
         skill_id=body.skill_id,
         step_number=body.step_number,
         outcome=body.outcome,
         exception_note=body.exception_note,
         duration_seconds=body.duration_seconds,
+        org_id=org_id,
     )
 
     if body.exception_note:

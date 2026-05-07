@@ -42,11 +42,12 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def run_staleness_check() -> dict[str, Any]:
-    """Walk every active skill; flag those past the staleness threshold,
-    clear the flag on any that have been reviewed since their last flag.
+def run_staleness_check(org_id: str | None = None) -> dict[str, Any]:
+    """Walk every active skill in the current org; flag those past the
+    staleness threshold, clear the flag on any reviewed since."""
+    from brain.store import _default_org_id
 
-    Returns a summary the scheduler can fold into ingest_runs."""
+    org = org_id or _default_org_id()
     client = get_client()
     threshold_days = _stale_days()
     threshold = _now_utc() - timedelta(days=threshold_days)
@@ -57,6 +58,7 @@ def run_staleness_check() -> dict[str, Any]:
         client.table("skills")
         .select("id,process_name,created_at,reviewed_at,needs_review")
         .eq("archived", False)
+        .eq("org_id", org)
         .execute()
         .data
         or []
@@ -115,11 +117,10 @@ def run_staleness_check() -> dict[str, Any]:
     return summary
 
 
-def mark_as_reviewed(skill_id: str) -> dict[str, Any]:
-    """Set reviewed_at=now() and clear every staleness flag on the row.
+def mark_as_reviewed(skill_id: str, org_id: str | None = None) -> dict[str, Any]:
+    """Set reviewed_at=now() and clear every staleness flag on the row."""
+    from brain.store import _default_org_id
 
-    Returns the updated row (the slice the API exposes), or {} if the
-    skill doesn't exist."""
     client = get_client()
     now_iso = _now_utc().isoformat()
     result = (
@@ -131,6 +132,7 @@ def mark_as_reviewed(skill_id: str) -> dict[str, Any]:
             "stale_flagged_at": None,
         })
         .eq("id", skill_id)
+        .eq("org_id", org_id or _default_org_id())
         .execute()
     )
     rows = result.data or []

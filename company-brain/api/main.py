@@ -21,15 +21,18 @@ if __package__ in (None, ""):
 
     sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 
+import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
+
+from brain.store import DEFAULT_ORG_ID
 
 from brain.drift import (
     get_conflict_history,
@@ -45,10 +48,12 @@ from brain.store import (
     archive_workflow,
     clear_workflows,
     count_chunks,
+    create_organisation,
     deactivate_connected_source,
     find_similar_workflow,
     get_connected_source,
     get_latest_ingest_run,
+    get_organisation_by_slug,
     get_workflow,
     insert_connected_source,
     list_connected_sources,
@@ -62,6 +67,22 @@ CHUNK_COUNT_TTL_SECONDS = 30.0
 _chunk_count_cache: dict[str, float | int | None] = {"value": None, "expires_at": 0.0}
 
 DEMO_DIR = Path(__file__).resolve().parent.parent / "demo-data"
+
+
+def get_org_id(request: Request) -> str:
+    """Resolve the request's tenant. Header → env → seeded default UUID.
+
+    The dashboard's Next.js proxies inject `X-Org-ID` from a cookie; the
+    Slack bot injects from `ORG_ID` env. Single-tenant deploys with
+    neither set fall through to the seeded default org so the system
+    still functions out of the box."""
+    header_val = request.headers.get("x-org-id") or request.headers.get("X-Org-ID")
+    if header_val and header_val.strip():
+        return header_val.strip()
+    return os.environ.get("ORG_ID", DEFAULT_ORG_ID)
+
+
+_OrgDep = Depends(get_org_id)
 
 
 def _cached_chunk_count() -> int:
@@ -158,22 +179,23 @@ app.mount("/api/v1", agent_app)
 
 
 @app.post("/query")
-def query(req: QueryRequest) -> dict:
-    return query_brain(req.question, top_k=req.top_k)
+def query(req: QueryRequest, org_id: str = _OrgDep) -> dict:
+    return query_brain(req.question, top_k=req.top_k, org_id=org_id)
 
 
 @app.post("/skills", response_model=SkillFileResponse)
-def skills(req: SkillsRequest):
-    return generate_skills_file(req.process_name)
+def skills(req: SkillsRequest, org_id: str = _OrgDep):
+    return generate_skills_file(req.process_name, org_id=org_id)
 
 
 @app.post("/workflows/generate")
-def generate_workflow(req: WorkflowRequest) -> dict:
+def generate_workflow(req: WorkflowRequest, org_id: str = _OrgDep) -> dict:
     return generate_workflow_from_text(
         req.name,
         req.content,
         source=req.source,
         source_metadata=req.source_metadata,
+        org_id=org_id,
     )
 
 
@@ -184,42 +206,44 @@ def workflow_similar(
     name: str,
     threshold: float = 0.4,
     exclude_id: str = "",
+    org_id: str = _OrgDep,
 ) -> dict | None:
     """Fuzzy-match an existing non-archived workflow by name. Returns null if none."""
     return find_similar_workflow(
         name=name,
         threshold=threshold,
         exclude_id=exclude_id or None,
+        org_id=org_id,
     )
 
 
 @app.get("/workflows/{workflow_id}")
-def get_workflow_endpoint(workflow_id: str) -> dict:
+def get_workflow_endpoint(workflow_id: str, org_id: str = _OrgDep) -> dict:
     """Fetch a single workflow row by id — UI deeplink and Slack-bot re-fetch."""
-    wf = get_workflow(workflow_id)
+    wf = get_workflow(workflow_id, org_id=org_id)
     if not wf:
         raise HTTPException(404, f"workflow not found: {workflow_id}")
     return wf
 
 
 @app.post("/workflows/{workflow_id}/archive")
-def archive_workflow_endpoint(workflow_id: str) -> dict:
+def archive_workflow_endpoint(workflow_id: str, org_id: str = _OrgDep) -> dict:
     """Mark a workflow archived. Used by the Slack bot's Update existing flow."""
-    ok = archive_workflow(workflow_id)
+    ok = archive_workflow(workflow_id, org_id=org_id)
     if not ok:
         raise HTTPException(404, f"workflow not found: {workflow_id}")
     return {"status": "ok", "archived": workflow_id}
 
 
 @app.get("/history")
-def history(limit: int = 5) -> list[dict]:
-    return list_workflows(limit=limit)
+def history(limit: int = 5, org_id: str = _OrgDep) -> list[dict]:
+    return list_workflows(limit=limit, org_id=org_id)
 
 
 @app.delete("/history")
-def clear_history() -> dict:
+def clear_history(org_id: str = _OrgDep) -> dict:
     """Wipe all rows from the skills table — backs the UI's Clear all button."""
-    cleared = clear_workflows()
+    cleared = clear_workflows(org_id=org_id)
     return {"status": "ok", "cleared": cleared}
 
 
@@ -240,22 +264,56 @@ def health() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Setup — creates an organisation. Called once by the dashboard's /setup page.
+# Open endpoint (no admin token) so a fresh deployment's first user can
+# bootstrap themselves; subsequent admin operations gate on ADMIN_TOKEN.
+# ---------------------------------------------------------------------------
+
+class SetupRequest(BaseModel):
+    company_name: str
+    user_name: str | None = None
+
+
+@app.post("/setup")
+def setup(req: SetupRequest) -> dict:
+    name = (req.company_name or "").strip()
+    if not name:
+        raise HTTPException(400, "company_name is required")
+    # Slugify: lowercase, alphanumeric + hyphens, deduplicate against existing.
+    base_slug = "".join(ch if ch.isalnum() else "-" for ch in name.lower()).strip("-") or "org"
+    slug = base_slug
+    suffix = 2
+    while get_organisation_by_slug(slug) is not None:
+        slug = f"{base_slug}-{suffix}"
+        suffix += 1
+    org = create_organisation(name=name, slug=slug)
+    return {
+        "id": str(org.get("id") or ""),
+        "name": org.get("name") or name,
+        "slug": org.get("slug") or slug,
+        "plan": org.get("plan") or "free",
+    }
+
+
+# ---------------------------------------------------------------------------
 # Drift / conflicts
 # ---------------------------------------------------------------------------
 
 @app.get("/conflicts")
-def conflicts(include_snoozed: bool = False) -> list[dict]:
+def conflicts(include_snoozed: bool = False, org_id: str = _OrgDep) -> list[dict]:
     """Unresolved drift conflicts. Pass ?include_snoozed=true to also list snoozed ones."""
-    return get_unresolved_conflicts(include_snoozed=include_snoozed)
+    return get_unresolved_conflicts(include_snoozed=include_snoozed, org_id=org_id)
 
 
 @app.post("/conflicts/{conflict_id}/resolve")
-def resolve_conflict_endpoint(conflict_id: str, req: ConflictResolveRequest) -> dict:
+def resolve_conflict_endpoint(
+    conflict_id: str, req: ConflictResolveRequest, org_id: str = _OrgDep
+) -> dict:
     """Apply 'accept' | 'dismiss' | 'snooze' to a conflict."""
     if req.action not in {"accept", "dismiss", "snooze"}:
         raise HTTPException(400, f"unknown action: {req.action!r}")
     try:
-        return resolve_conflict(conflict_id, req.action, req.resolved_by)
+        return resolve_conflict(conflict_id, req.action, req.resolved_by, org_id=org_id)
     except LookupError as exc:
         raise HTTPException(404, str(exc))
     except ValueError as exc:
@@ -263,17 +321,17 @@ def resolve_conflict_endpoint(conflict_id: str, req: ConflictResolveRequest) -> 
 
 
 @app.get("/skills/{skill_id}/conflicts")
-def skill_conflicts(skill_id: str) -> list[dict]:
+def skill_conflicts(skill_id: str, org_id: str = _OrgDep) -> list[dict]:
     """Full conflict history for a single skill — any status."""
-    return get_conflict_history(skill_id)
+    return get_conflict_history(skill_id, org_id=org_id)
 
 
 @app.post("/skills/{skill_id}/review")
-def skill_mark_reviewed(skill_id: str) -> dict:
+def skill_mark_reviewed(skill_id: str, org_id: str = _OrgDep) -> dict:
     """Mark a skill as freshly reviewed — clears needs_review + bumps reviewed_at."""
     from brain.staleness import mark_as_reviewed
 
-    row = mark_as_reviewed(skill_id)
+    row = mark_as_reviewed(skill_id, org_id=org_id)
     if not row:
         raise HTTPException(404, f"skill not found: {skill_id}")
     return row
@@ -320,14 +378,15 @@ def _validate_source_config(source_type: str, config: dict) -> None:
 
 
 @app.get("/ingest/status")
-def ingest_status() -> dict:
-    """Last run summary + next scheduled run + cadence."""
+def ingest_status(org_id: str = _OrgDep) -> dict:
+    """Last run summary (this org's) + next scheduled run + cadence."""
     from brain.scheduler import scheduler
 
-    last_db = get_latest_ingest_run()
-    last = scheduler.last_run_summary or last_db
+    last_db = get_latest_ingest_run(org_id=org_id)
+    # The in-memory last_run_summary is a cross-org aggregate; prefer the
+    # per-org DB row so each tenant's dashboard is accurate.
     return {
-        "last_run": last,
+        "last_run": last_db or scheduler.last_run_summary,
         "next_run_at": scheduler.next_run_at_iso(),
         "schedule_hours": scheduler.schedule_hours(),
     }
@@ -343,22 +402,24 @@ def ingest_trigger(_admin=_AdminDep) -> dict:
 
 
 @app.get("/sources")
-def sources_list() -> list[dict]:
-    """Every connected source. Tokens redacted in the config field."""
-    return list_connected_sources(redact=True)
+def sources_list(org_id: str = _OrgDep) -> list[dict]:
+    """Every connected source for this org. Tokens redacted in the config field."""
+    return list_connected_sources(redact=True, org_id=org_id)
 
 
 @app.post("/sources")
-def sources_create(req: SourceCreate, _admin=_AdminDep) -> dict:
+def sources_create(req: SourceCreate, org_id: str = _OrgDep, _admin=_AdminDep) -> dict:
     if req.source_type not in {"slack", "notion", "github", "gmail", "intercom"}:
         raise HTTPException(400, f"unsupported source_type: {req.source_type}")
     _validate_source_config(req.source_type, req.config)
-    return insert_connected_source(req.source_type, req.display_name, req.config)
+    return insert_connected_source(req.source_type, req.display_name, req.config, org_id=org_id)
 
 
 @app.patch("/sources/{source_id}")
-def sources_update(source_id: str, req: SourceUpdate, _admin=_AdminDep) -> dict:
-    existing = get_connected_source(source_id)
+def sources_update(
+    source_id: str, req: SourceUpdate, org_id: str = _OrgDep, _admin=_AdminDep
+) -> dict:
+    existing = get_connected_source(source_id, org_id=org_id)
     if not existing:
         raise HTTPException(404, f"source not found: {source_id}")
     patch: dict = {}
@@ -371,16 +432,16 @@ def sources_update(source_id: str, req: SourceUpdate, _admin=_AdminDep) -> dict:
         patch["is_active"] = req.is_active
     if not patch:
         raise HTTPException(400, "no fields to update")
-    updated = update_connected_source(source_id, patch)
+    updated = update_connected_source(source_id, patch, org_id=org_id)
     if updated is None:
         raise HTTPException(404, f"source not found: {source_id}")
     return updated
 
 
 @app.delete("/sources/{source_id}")
-def sources_delete(source_id: str, _admin=_AdminDep) -> dict:
+def sources_delete(source_id: str, org_id: str = _OrgDep, _admin=_AdminDep) -> dict:
     """Soft-delete (is_active=false). Stops the scheduler picking it up."""
-    ok = deactivate_connected_source(source_id)
+    ok = deactivate_connected_source(source_id, org_id=org_id)
     if not ok:
         raise HTTPException(404, f"source not found: {source_id}")
     return {"status": "ok", "deactivated": source_id}

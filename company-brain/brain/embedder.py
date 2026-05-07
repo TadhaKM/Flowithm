@@ -125,15 +125,10 @@ def chunk_exists(content_hash: str) -> bool:
     return len(result.data or []) > 0
 
 
-def store_chunk(chunk: Chunk, embedding: list[float]) -> str:
-    """Upsert one Chunk + embedding into Supabase. Returns the row's uuid.
+def store_chunk(chunk: Chunk, embedding: list[float], org_id: str | None = None) -> str:
+    """Upsert one Chunk + embedding into Supabase. Returns the row's uuid."""
+    from brain.store import _default_org_id  # avoid circular at module load
 
-    De-duplicates on a SHA-256 of the content: re-ingesting identical text
-    updates source_name + metadata + updated_at on the existing row instead
-    of inserting a duplicate (chunks_content_hash_idx is the unique key).
-
-    Raises RuntimeError if the Supabase write fails or returns no row.
-    """
     content_hash = hashlib.sha256(chunk.content.encode("utf-8")).hexdigest()
     row = {
         "source_type": chunk.source_type,
@@ -143,6 +138,7 @@ def store_chunk(chunk: Chunk, embedding: list[float]) -> str:
         "embedding": embedding,
         "content_hash": content_hash,
         "updated_at": datetime.now(timezone.utc).isoformat(),
+        "org_id": org_id or _default_org_id(),
     }
     try:
         result = (
@@ -160,18 +156,21 @@ def store_chunk(chunk: Chunk, embedding: list[float]) -> str:
     return str(rows[0].get("id") or "")
 
 
-def embed_and_store(chunk: Chunk) -> str | None:
+def embed_and_store(chunk: Chunk, org_id: str | None = None) -> str | None:
     """Convenience wrapper: embed `chunk.content`, store, return uuid.
 
     Skips Voyage + Supabase entirely if the content is already stored
     (matched by SHA-256 of chunk.content). Returns None in that case.
+    Note that dedup is GLOBAL on content_hash — two orgs ingesting the
+    same Slack message both surface the same row. Acceptable for now;
+    revisit if cross-org content-leakage becomes a concern.
     """
     content_hash = hashlib.sha256(chunk.content.encode("utf-8")).hexdigest()
     if chunk_exists(content_hash):
         print(f"[embedder] Skipping duplicate chunk: {chunk.source_name}")
         return None
     embedding = get_embedding(chunk.content)
-    return store_chunk(chunk, embedding)
+    return store_chunk(chunk, embedding, org_id=org_id)
 
 
 # ---------------------------------------------------------------------------

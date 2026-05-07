@@ -1,4 +1,18 @@
-"""Supabase store interface — chunks (RAG) + skills (generated workflows)."""
+"""Supabase store interface — chunks (RAG) + skills (generated workflows).
+
+Multi-tenancy: every helper that touches an org-scoped table accepts an
+optional `org_id: str | None` parameter. When omitted, `_default_org_id()`
+falls back to the `ORG_ID` env var (the seed default org for self-hosted
+single-tenant deploys). Callers that handle multiple tenants — agent-API
+endpoints driven by a Bearer token, the dashboard with a session cookie,
+the scheduler walking organisations — pass org_id explicitly.
+
+We intentionally do NOT raise when `org_id` is None and `ORG_ID` is unset:
+that would make tests need explicit env stubs everywhere. Instead we fall
+back to a literal "00000000-0000-0000-0000-000000000001" so a missing env
+matches the seed UUID by coincidence; mis-configured prod deploys will see
+queries return empty and notice immediately.
+"""
 import os
 from datetime import datetime, timezone
 from typing import Any
@@ -13,6 +27,13 @@ MATCH_FN = "match_chunks"
 SKILLS_TABLE = "skills"
 SIMILAR_FN = "find_similar_workflow"
 
+DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001"
+
+
+def _default_org_id() -> str:
+    """Resolve the active org for callers that didn't pass one explicitly."""
+    return os.environ.get("ORG_ID", DEFAULT_ORG_ID)
+
 
 def get_client() -> Client:
     url = os.environ["SUPABASE_URL"]
@@ -21,27 +42,74 @@ def get_client() -> Client:
 
 
 # ---------------------------------------------------------------------------
+# organisations
+# ---------------------------------------------------------------------------
+
+def list_organisations() -> list[dict[str, Any]]:
+    client = get_client()
+    result = client.table("organisations").select("*").order("created_at", desc=True).execute()
+    return result.data or []
+
+
+def get_organisation(org_id: str) -> dict[str, Any] | None:
+    client = get_client()
+    result = client.table("organisations").select("*").eq("id", org_id).limit(1).execute()
+    rows = result.data or []
+    return rows[0] if rows else None
+
+
+def get_organisation_by_slug(slug: str) -> dict[str, Any] | None:
+    client = get_client()
+    result = client.table("organisations").select("*").eq("slug", slug).limit(1).execute()
+    rows = result.data or []
+    return rows[0] if rows else None
+
+
+def create_organisation(name: str, slug: str, plan: str = "free") -> dict[str, Any]:
+    client = get_client()
+    result = (
+        client.table("organisations")
+        .insert({"name": name, "slug": slug, "plan": plan})
+        .execute()
+    )
+    return (result.data or [{}])[0]
+
+
+# ---------------------------------------------------------------------------
 # chunks (RAG corpus)
 # ---------------------------------------------------------------------------
 
-def upsert_chunks(chunks: list[dict[str, Any]]) -> None:
+def upsert_chunks(chunks: list[dict[str, Any]], org_id: str | None = None) -> None:
+    org = org_id or _default_org_id()
     client = get_client()
-    client.table(TABLE).insert(chunks).execute()
+    rows = [{**c, "org_id": org} for c in chunks]
+    client.table(TABLE).insert(rows).execute()
 
 
-def similarity_search(query_embedding: list[float], k: int = 5) -> list[dict[str, Any]]:
+def similarity_search(
+    query_embedding: list[float], k: int = 5, org_id: str | None = None
+) -> list[dict[str, Any]]:
     client = get_client()
     result = client.rpc(
         MATCH_FN,
-        {"query_embedding": query_embedding, "match_count": k},
+        {
+            "query_embedding": query_embedding,
+            "match_count": k,
+            "target_org_id": org_id or _default_org_id(),
+        },
     ).execute()
     return result.data or []
 
 
-def count_chunks() -> int:
-    """Number of rows in the chunks table."""
+def count_chunks(org_id: str | None = None) -> int:
+    """Number of rows in the chunks table for the current org."""
     client = get_client()
-    result = client.table(TABLE).select("*", count="exact", head=True).execute()
+    result = (
+        client.table(TABLE)
+        .select("*", count="exact", head=True)
+        .eq("org_id", org_id or _default_org_id())
+        .execute()
+    )
     return result.count or 0
 
 
@@ -88,16 +156,9 @@ def save_workflow(
     source: str | None = None,
     source_metadata: dict[str, Any] | None = None,
     raw_text: str | None = None,
+    org_id: str | None = None,
 ) -> str:
-    """Persist a generated workflow; return the new row's UUID as a string.
-
-    Optional `source` ("slack" / "manual" / etc.) and `source_metadata`
-    (free-form JSON describing channel, thread, triggering user, etc.)
-    travel with the workflow for provenance.
-
-    `raw_text` is the original input the workflow was distilled from; the
-    /brain/[id] detail page reads it for the "Re-extract" feature.
-    """
+    """Persist a generated workflow; return the new row's UUID as a string."""
     client = get_client()
     row = {
         "process_name": workflow["process"],
@@ -111,19 +172,21 @@ def save_workflow(
         "source": source or "manual",
         "source_metadata": source_metadata or {},
         "raw_text": raw_text or "",
+        "org_id": org_id or _default_org_id(),
     }
     result = client.table(SKILLS_TABLE).insert(row).execute()
     inserted = (result.data or [{}])[0]
     return str(inserted.get("id") or "")
 
 
-def list_workflows(limit: int = 5) -> list[dict[str, Any]]:
-    """Most recent non-archived workflows, newest first."""
+def list_workflows(limit: int = 5, org_id: str | None = None) -> list[dict[str, Any]]:
+    """Most recent non-archived workflows for the current org, newest first."""
     client = get_client()
     result = (
         client.table(SKILLS_TABLE)
         .select("*")
         .eq("archived", False)
+        .eq("org_id", org_id or _default_org_id())
         .order("generated_at", desc=True)
         .limit(limit)
         .execute()
@@ -131,13 +194,14 @@ def list_workflows(limit: int = 5) -> list[dict[str, Any]]:
     return [_row_to_workflow(r) for r in (result.data or [])]
 
 
-def get_workflow(workflow_id: str) -> dict[str, Any] | None:
-    """Fetch a single workflow by ID. Returns None if not found."""
+def get_workflow(workflow_id: str, org_id: str | None = None) -> dict[str, Any] | None:
+    """Fetch a single workflow by ID, scoped to the current org. None if not found."""
     client = get_client()
     result = (
         client.table(SKILLS_TABLE)
         .select("*")
         .eq("id", workflow_id)
+        .eq("org_id", org_id or _default_org_id())
         .limit(1)
         .execute()
     )
@@ -147,20 +211,16 @@ def get_workflow(workflow_id: str) -> dict[str, Any] | None:
     return _row_to_workflow(rows[0])
 
 
-def archive_workflow(workflow_id: str) -> bool:
-    """Mark a workflow archived. Returns True if a row was updated.
-
-    archived_at gets the current UTC timestamp. We set it Python-side rather
-    than via a DB trigger because the trigger would also fire on bulk
-    archival operations we may run later — keeping the timestamp logic next
-    to the call site is more obvious.
-    """
+def archive_workflow(workflow_id: str, org_id: str | None = None) -> bool:
+    """Mark a workflow archived. Scoped to org so an attacker with a stolen
+    UUID from one tenant can't archive a different tenant's row."""
     client = get_client()
     now = datetime.now(timezone.utc).isoformat()
     result = (
         client.table(SKILLS_TABLE)
         .update({"archived": True, "archived_at": now})
         .eq("id", workflow_id)
+        .eq("org_id", org_id or _default_org_id())
         .execute()
     )
     return bool(result.data)
@@ -170,13 +230,9 @@ def find_similar_workflow(
     name: str,
     threshold: float = 0.4,
     exclude_id: str | None = None,
+    org_id: str | None = None,
 ) -> dict[str, Any] | None:
-    """Find a non-archived workflow whose process_name is fuzzily similar.
-
-    Backed by the find_similar_workflow Postgres function (pg_trgm). Returns
-    None if nothing crosses `threshold`, or if the RPC fails — callers
-    treat absence as "no match" and continue.
-    """
+    """Fuzzy-match an existing non-archived workflow within the current org."""
     client = get_client()
     try:
         result = client.rpc(
@@ -185,6 +241,7 @@ def find_similar_workflow(
                 "q_name": name,
                 "min_sim": threshold,
                 "exclude_id": exclude_id or "",
+                "target_org_id": org_id or _default_org_id(),
             },
         ).execute()
     except Exception as exc:
@@ -207,12 +264,9 @@ def list_skills_index(
     needs_review: bool | None = None,
     limit: int = 50,
     offset: int = 0,
+    org_id: str | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
-    """Lightweight index for GET /api/v1/skills — no raw_text, no full steps.
-
-    Returns (rows, total_count). `total_count` reflects the post-filter set,
-    not the page; the agent SDK can paginate by incrementing offset.
-    """
+    """Lightweight index for GET /api/v1/skills — no raw_text, no full steps."""
     client = get_client()
     base = (
         client.table(SKILLS_TABLE)
@@ -221,6 +275,7 @@ def list_skills_index(
             count="exact",
         )
         .eq("archived", False)
+        .eq("org_id", org_id or _default_org_id())
     )
     if source:
         base = base.eq("source", source)
@@ -251,20 +306,17 @@ def get_skill_by_name_fuzzy(
     name: str,
     threshold: float = 0.4,
     closest_threshold: float = 0.2,
+    org_id: str | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Exact-match first; if no exact, fuzzy-match via pg_trgm similarity.
-
-    Returns (skill, closest_match_name).
-      - exact hit:        (skill, None)
-      - fuzzy hit:        (skill, None)
-      - no hit but close: (None, "<closest process_name>")
-      - no hit at all:    (None, None)
-    """
+    Both passes are scoped to the current org."""
+    org = org_id or _default_org_id()
     client = get_client()
     exact = (
         client.table(SKILLS_TABLE)
         .select("*")
         .eq("archived", False)
+        .eq("org_id", org)
         .ilike("process_name", name)
         .limit(1)
         .execute()
@@ -273,36 +325,44 @@ def get_skill_by_name_fuzzy(
     if rows:
         return _row_to_workflow(rows[0]), None
 
-    # Fall back to find_similar_workflow (pg_trgm). Returns the best match
-    # at or above `threshold`, or None.
-    similar = find_similar_workflow(name=name, threshold=threshold)
+    similar = find_similar_workflow(name=name, threshold=threshold, org_id=org)
     if similar:
-        # Re-fetch the full row so we get raw_text + every column.
-        wf = get_workflow(similar["id"])
+        wf = get_workflow(similar["id"], org_id=org)
         if wf:
             return wf, None
 
-    closest = find_similar_workflow(name=name, threshold=closest_threshold)
+    closest = find_similar_workflow(name=name, threshold=closest_threshold, org_id=org)
     return None, (closest["process"] if closest else None)
 
 
-def update_skill_summary_embedding(skill_id: str, embedding: list[float]) -> None:
-    """Persist the summary_embedding for an existing skill row (idempotent)."""
+def update_skill_summary_embedding(
+    skill_id: str, embedding: list[float], org_id: str | None = None
+) -> None:
+    """Persist summary_embedding for an existing skill (scoped to org)."""
     if not skill_id:
         return
     client = get_client()
-    client.table(SKILLS_TABLE).update({"summary_embedding": embedding}).eq("id", skill_id).execute()
+    (
+        client.table(SKILLS_TABLE)
+        .update({"summary_embedding": embedding})
+        .eq("id", skill_id)
+        .eq("org_id", org_id or _default_org_id())
+        .execute()
+    )
 
 
 def match_skills_by_embedding(
-    query_embedding: list[float], k: int = 3
+    query_embedding: list[float], k: int = 3, org_id: str | None = None
 ) -> list[dict[str, Any]]:
-    """RPC into the match_skills() Postgres function. Returns rows with
-    similarity float in (0, 1] — higher is better (1 - cosine distance)."""
+    """RPC into match_skills(), filtered to the current org."""
     client = get_client()
     result = client.rpc(
         "match_skills",
-        {"query_embedding": query_embedding, "match_count": k},
+        {
+            "query_embedding": query_embedding,
+            "match_count": k,
+            "target_org_id": org_id or _default_org_id(),
+        },
     ).execute()
     return result.data or []
 
@@ -311,44 +371,56 @@ def match_skills_by_embedding(
 # api_keys, api_requests, executions
 # ---------------------------------------------------------------------------
 
-def insert_api_key(name: str, key_prefix: str, key_hash: str) -> dict[str, Any]:
+def insert_api_key(
+    name: str, key_prefix: str, key_hash: str, org_id: str | None = None
+) -> dict[str, Any]:
     client = get_client()
     result = (
         client.table("api_keys")
-        .insert({"name": name, "key_prefix": key_prefix, "key_hash": key_hash})
+        .insert({
+            "name": name,
+            "key_prefix": key_prefix,
+            "key_hash": key_hash,
+            "org_id": org_id or _default_org_id(),
+        })
         .execute()
     )
     return (result.data or [{}])[0]
 
 
-def list_api_keys() -> list[dict[str, Any]]:
+def list_api_keys(org_id: str | None = None) -> list[dict[str, Any]]:
     client = get_client()
     result = (
         client.table("api_keys")
-        .select("id,name,key_prefix,created_at,last_used_at,request_count,is_active")
+        .select("id,name,key_prefix,created_at,last_used_at,request_count,is_active,org_id")
+        .eq("org_id", org_id or _default_org_id())
         .order("created_at", desc=True)
         .execute()
     )
     return result.data or []
 
 
-def deactivate_api_key(key_id: str) -> bool:
+def deactivate_api_key(key_id: str, org_id: str | None = None) -> bool:
     client = get_client()
     result = (
         client.table("api_keys")
         .update({"is_active": False})
         .eq("id", key_id)
+        .eq("org_id", org_id or _default_org_id())
         .execute()
     )
     return bool(result.data)
 
 
 def find_api_keys_by_prefix(prefix: str) -> list[dict[str, Any]]:
-    """Candidates for bcrypt-verify — narrows to ~1 row in the common case."""
+    """Candidates for bcrypt-verify. Intentionally cross-org — auth uses the
+    matched key's org_id to scope every downstream query, so this is the
+    one place we look across tenants. Hash collisions across orgs are a
+    1-in-2^256 event we tolerate."""
     client = get_client()
     result = (
         client.table("api_keys")
-        .select("id,name,key_hash,key_prefix,is_active")
+        .select("id,name,key_hash,key_prefix,is_active,org_id")
         .eq("key_prefix", prefix)
         .execute()
     )
@@ -356,7 +428,8 @@ def find_api_keys_by_prefix(prefix: str) -> list[dict[str, Any]]:
 
 
 def increment_api_key_usage(key_id: str) -> None:
-    """Atomic last_used_at + request_count bump via the SQL function."""
+    """Atomic last_used_at + request_count bump via the SQL function. We
+    have key_id from auth (already org-validated) so no extra filter."""
     client = get_client()
     client.rpc("increment_api_key_usage", {"key_id": key_id}).execute()
 
@@ -368,6 +441,8 @@ def insert_api_request(
     query_text: str | None = None,
     matched_skill_id: str | None = None,
 ) -> None:
+    """Audit log — no per-org scoping needed (every row references an
+    api_key whose org is recoverable via JOIN)."""
     client = get_client()
     client.table("api_requests").insert({
         "api_key_id": api_key_id,
@@ -399,11 +474,12 @@ def _redact_config(config: dict[str, Any] | None) -> dict[str, Any]:
     return out
 
 
-def list_connected_sources(redact: bool = True) -> list[dict[str, Any]]:
+def list_connected_sources(redact: bool = True, org_id: str | None = None) -> list[dict[str, Any]]:
     client = get_client()
     result = (
         client.table("connected_sources")
         .select("*")
+        .eq("org_id", org_id or _default_org_id())
         .order("created_at", desc=True)
         .execute()
     )
@@ -414,25 +490,26 @@ def list_connected_sources(redact: bool = True) -> list[dict[str, Any]]:
     return rows
 
 
-def list_active_connected_sources() -> list[dict[str, Any]]:
-    """Used by the scheduler — returns full (un-redacted) config so the
-    ingestor can read its tokens. Never expose this to the dashboard."""
+def list_active_connected_sources(org_id: str | None = None) -> list[dict[str, Any]]:
+    """Used by the scheduler. With org_id=None, returns ACTIVE sources across
+    every org (so the scheduler can group by org). With a specific org_id,
+    returns just that tenant's sources. Un-redacted in both cases — the
+    scheduler needs the raw tokens; never expose this to the dashboard."""
     client = get_client()
-    result = (
-        client.table("connected_sources")
-        .select("*")
-        .eq("is_active", True)
-        .execute()
-    )
+    base = client.table("connected_sources").select("*").eq("is_active", True)
+    if org_id is not None:
+        base = base.eq("org_id", org_id)
+    result = base.execute()
     return result.data or []
 
 
-def get_connected_source(source_id: str) -> dict[str, Any] | None:
+def get_connected_source(source_id: str, org_id: str | None = None) -> dict[str, Any] | None:
     client = get_client()
     result = (
         client.table("connected_sources")
         .select("*")
         .eq("id", source_id)
+        .eq("org_id", org_id or _default_org_id())
         .limit(1)
         .execute()
     )
@@ -444,6 +521,7 @@ def insert_connected_source(
     source_type: str,
     display_name: str,
     config: dict[str, Any],
+    org_id: str | None = None,
 ) -> dict[str, Any]:
     client = get_client()
     result = (
@@ -453,6 +531,7 @@ def insert_connected_source(
             "display_name": display_name,
             "config": config,
             "is_active": True,
+            "org_id": org_id or _default_org_id(),
         })
         .execute()
     )
@@ -461,12 +540,15 @@ def insert_connected_source(
     return row
 
 
-def update_connected_source(source_id: str, patch: dict[str, Any]) -> dict[str, Any] | None:
+def update_connected_source(
+    source_id: str, patch: dict[str, Any], org_id: str | None = None
+) -> dict[str, Any] | None:
     client = get_client()
     result = (
         client.table("connected_sources")
         .update(patch)
         .eq("id", source_id)
+        .eq("org_id", org_id or _default_org_id())
         .execute()
     )
     rows = result.data or []
@@ -476,12 +558,13 @@ def update_connected_source(source_id: str, patch: dict[str, Any]) -> dict[str, 
     return rows[0]
 
 
-def deactivate_connected_source(source_id: str) -> bool:
+def deactivate_connected_source(source_id: str, org_id: str | None = None) -> bool:
     client = get_client()
     result = (
         client.table("connected_sources")
         .update({"is_active": False})
         .eq("id", source_id)
+        .eq("org_id", org_id or _default_org_id())
         .execute()
     )
     return bool(result.data)
@@ -492,7 +575,7 @@ def update_source_last_synced(source_id: str, when_iso: str) -> None:
     client.table("connected_sources").update({"last_synced_at": when_iso}).eq("id", source_id).execute()
 
 
-def insert_ingest_run(summary: dict[str, Any]) -> str:
+def insert_ingest_run(summary: dict[str, Any], org_id: str | None = None) -> str:
     """Persist one scheduled or manual run. errors is stored as jsonb."""
     client = get_client()
     payload = {
@@ -505,16 +588,18 @@ def insert_ingest_run(summary: dict[str, Any]) -> str:
         "stale_flagged":    int(summary.get("stale_flagged", 0)),
         "stale_cleared":    int(summary.get("stale_cleared", 0)),
         "errors":           summary.get("errors") or [],
+        "org_id":           org_id or _default_org_id(),
     }
     result = client.table("ingest_runs").insert(payload).execute()
     return str((result.data or [{}])[0].get("id") or "")
 
 
-def get_latest_ingest_run() -> dict[str, Any] | None:
+def get_latest_ingest_run(org_id: str | None = None) -> dict[str, Any] | None:
     client = get_client()
     result = (
         client.table("ingest_runs")
         .select("*")
+        .eq("org_id", org_id or _default_org_id())
         .order("started_at", desc=True)
         .limit(1)
         .execute()
@@ -529,6 +614,7 @@ def insert_execution(
     outcome: str,
     exception_note: str | None,
     duration_seconds: int | None,
+    org_id: str | None = None,
 ) -> str:
     client = get_client()
     result = client.table("executions").insert({
@@ -537,20 +623,18 @@ def insert_execution(
         "outcome": outcome,
         "exception_note": exception_note,
         "duration_seconds": duration_seconds,
+        "org_id": org_id or _default_org_id(),
     }).execute()
     return str((result.data or [{}])[0].get("id") or "")
 
 
-def clear_workflows() -> int:
-    """Delete every row in the skills table. Returns the count cleared.
-
-    supabase-py's `.delete()` refuses to run without a WHERE clause as a
-    safety; `generated_at >= epoch` matches every row that has ever existed.
-    """
+def clear_workflows(org_id: str | None = None) -> int:
+    """Delete every workflow row in the current org. Returns the count cleared."""
     client = get_client()
     result = (
         client.table(SKILLS_TABLE)
         .delete()
+        .eq("org_id", org_id or _default_org_id())
         .gte("generated_at", "1970-01-01")
         .execute()
     )

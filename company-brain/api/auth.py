@@ -135,6 +135,9 @@ async def verify_api_key(
     _check_rate_limit(str(matched["id"]))
 
     request.state.api_key_id = str(matched["id"])
+    # The matched key carries its tenant — every downstream query in this
+    # request reads request.state.org_id rather than ORG_ID env.
+    request.state.org_id = str(matched.get("org_id") or "")
     request.state.started_perf = started
     request.state.endpoint = request.url.path
 

@@ -33,7 +33,7 @@ def test_health_returns_status_and_chunk_count(client, monkeypatch):
 
 def test_history_returns_workflow_list(client, monkeypatch):
     sample = [{"id": "a", "process": "X"}, {"id": "b", "process": "Y"}]
-    monkeypatch.setattr("api.main.list_workflows", lambda limit=5: sample)
+    monkeypatch.setattr("api.main.list_workflows", lambda limit=5, **kw: sample)
     res = client.get("/history")
     assert res.status_code == 200
     assert res.json() == sample
@@ -42,7 +42,7 @@ def test_history_returns_workflow_list(client, monkeypatch):
 def test_history_passes_limit_param(client, monkeypatch):
     captured = {}
 
-    def fake_list(limit=5):
+    def fake_list(limit=5, **kw):
         captured["limit"] = limit
         return []
 
@@ -52,7 +52,7 @@ def test_history_passes_limit_param(client, monkeypatch):
 
 
 def test_clear_history_calls_clear_workflows(client, monkeypatch):
-    monkeypatch.setattr("api.main.clear_workflows", lambda: 7)
+    monkeypatch.setattr("api.main.clear_workflows", lambda **kw: 7)
     res = client.delete("/history")
     assert res.status_code == 200
     assert res.json() == {"status": "ok", "cleared": 7}
@@ -65,7 +65,7 @@ def test_clear_history_calls_clear_workflows(client, monkeypatch):
 def test_workflows_generate_passes_through_args(client, monkeypatch):
     captured = {}
 
-    def fake_generate(name, content, source=None, source_metadata=None):
+    def fake_generate(name, content, source=None, source_metadata=None, **kw):
         captured.update(
             {
                 "name": name,
@@ -106,7 +106,7 @@ def test_workflows_generate_passes_through_args(client, monkeypatch):
 def test_workflows_generate_defaults_optional_fields(client, monkeypatch):
     captured = {}
 
-    def fake_generate(name, content, source=None, source_metadata=None):
+    def fake_generate(name, content, source=None, source_metadata=None, **kw):
         captured["source"] = source
         captured["source_metadata"] = source_metadata
         return {
@@ -127,7 +127,7 @@ def test_workflows_generate_defaults_optional_fields(client, monkeypatch):
 def test_workflows_similar_returns_match(client, monkeypatch):
     monkeypatch.setattr(
         "api.main.find_similar_workflow",
-        lambda name, threshold=0.4, exclude_id=None: {"id": "1", "process": "Refund"},
+        lambda name, threshold=0.4, exclude_id=None, **kw: {"id": "1", "process": "Refund"},
     )
     res = client.get("/workflows/similar", params={"name": "Refunds"})
     assert res.status_code == 200
@@ -137,7 +137,7 @@ def test_workflows_similar_returns_match(client, monkeypatch):
 def test_workflows_similar_returns_null_when_no_match(client, monkeypatch):
     monkeypatch.setattr(
         "api.main.find_similar_workflow",
-        lambda name, threshold=0.4, exclude_id=None: None,
+        lambda name, threshold=0.4, exclude_id=None, **kw: None,
     )
     res = client.get("/workflows/similar", params={"name": "Nothing"})
     assert res.status_code == 200
@@ -145,7 +145,7 @@ def test_workflows_similar_returns_null_when_no_match(client, monkeypatch):
 
 
 def test_workflows_get_returns_404_when_missing(client, monkeypatch):
-    monkeypatch.setattr("api.main.get_workflow", lambda wid: None)
+    monkeypatch.setattr("api.main.get_workflow", lambda wid, **kw: None)
     res = client.get("/workflows/does-not-exist")
     assert res.status_code == 404
 
@@ -153,7 +153,7 @@ def test_workflows_get_returns_404_when_missing(client, monkeypatch):
 def test_workflows_get_returns_workflow(client, monkeypatch):
     monkeypatch.setattr(
         "api.main.get_workflow",
-        lambda wid: {"id": wid, "process": "X"},
+        lambda wid, **kw: {"id": wid, "process": "X"},
     )
     res = client.get("/workflows/abc-123")
     assert res.status_code == 200
@@ -165,24 +165,24 @@ def test_route_order_similar_takes_priority_over_id_match(client, monkeypatch):
     # If get_workflow is called with "similar", the route ordering broke.
     monkeypatch.setattr(
         "api.main.get_workflow",
-        lambda wid: pytest.fail(f"should not be called; got id={wid!r}"),
+        lambda wid, **kw: pytest.fail(f"should not be called; got id={wid!r}"),
     )
     monkeypatch.setattr(
         "api.main.find_similar_workflow",
-        lambda name, threshold=0.4, exclude_id=None: None,
+        lambda name, threshold=0.4, exclude_id=None, **kw: None,
     )
     res = client.get("/workflows/similar", params={"name": "X"})
     assert res.status_code == 200
 
 
 def test_workflows_archive_404_on_missing(client, monkeypatch):
-    monkeypatch.setattr("api.main.archive_workflow", lambda wid: False)
+    monkeypatch.setattr("api.main.archive_workflow", lambda wid, **kw: False)
     res = client.post("/workflows/abc/archive")
     assert res.status_code == 404
 
 
 def test_workflows_archive_success(client, monkeypatch):
-    monkeypatch.setattr("api.main.archive_workflow", lambda wid: True)
+    monkeypatch.setattr("api.main.archive_workflow", lambda wid, **kw: True)
     res = client.post("/workflows/abc/archive")
     assert res.status_code == 200
     assert res.json() == {"status": "ok", "archived": "abc"}
@@ -235,7 +235,7 @@ def test_skills_endpoint_calls_through(client, monkeypatch):
         "exceptions": [],
         "sources_summary": "From the Notion refund policy.",
     }
-    monkeypatch.setattr("api.main.generate_skills_file", lambda name: fake_response)
+    monkeypatch.setattr("api.main.generate_skills_file", lambda name, **kw: fake_response)
     res = client.post("/skills", json={"process_name": "Refund"})
     assert res.status_code == 200
     body = res.json()
@@ -250,7 +250,7 @@ def test_skills_endpoint_calls_through(client, monkeypatch):
 def test_query_endpoint_calls_through(client, monkeypatch):
     monkeypatch.setattr(
         "api.main.query_brain",
-        lambda question, top_k=6: {
+        lambda question, top_k=6, **kw: {
             "answer": f"You asked: {question}",
             "sources": [],
             "confidence": "low",
@@ -264,7 +264,7 @@ def test_query_endpoint_calls_through(client, monkeypatch):
 def test_query_passes_top_k(client, monkeypatch):
     captured = {}
 
-    def fake(question, top_k=6):
+    def fake(question, top_k=6, **kw):
         captured["top_k"] = top_k
         return {"answer": "", "sources": [], "confidence": "low"}
 

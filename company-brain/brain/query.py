@@ -196,10 +196,10 @@ def _preview(text: str, n: int = 200) -> str:
     return text[:n] + ("…" if len(text) > n else "")
 
 
-def query_brain(question: str, top_k: int = 6) -> dict[str, Any]:
-    """Embed the question, retrieve top_k chunks, answer with Claude."""
+def query_brain(question: str, top_k: int = 6, org_id: str | None = None) -> dict[str, Any]:
+    """Embed the question, retrieve top_k chunks (current org), answer with Claude."""
     query_embedding = embed_query(question)
-    matches = similarity_search(query_embedding, k=top_k)
+    matches = similarity_search(query_embedding, k=top_k, org_id=org_id)
 
     if not matches:
         return {
@@ -249,15 +249,12 @@ def query_brain(question: str, top_k: int = 6) -> dict[str, Any]:
     }
 
 
-def generate_skills_file(process_name: str, top_k: int = 10) -> dict[str, Any]:
-    """RAG-driven skill file: read chunks for the process, structure into SKILL_SCHEMA.
-
-    Use generate_workflow_from_text() instead when the user pastes their own
-    source material; that path skips retrieval entirely and produces the
-    workflow shape (description + sources array).
-    """
+def generate_skills_file(
+    process_name: str, top_k: int = 10, org_id: str | None = None
+) -> dict[str, Any]:
+    """RAG-driven skill file: read chunks for the process, structure into SKILL_SCHEMA."""
     query_embedding = embed_query(process_name)
-    matches = similarity_search(query_embedding, k=top_k)
+    matches = similarity_search(query_embedding, k=top_k, org_id=org_id)
 
     if not matches:
         return {
@@ -307,6 +304,7 @@ def generate_workflow_from_text(
     content: str,
     source: str | None = None,
     source_metadata: dict[str, Any] | None = None,
+    org_id: str | None = None,
 ) -> dict[str, Any]:
     """Transform user-pasted source material into a structured workflow.
 
@@ -348,23 +346,18 @@ def generate_workflow_from_text(
 
     workflow_id = ""
     try:
-        # Persist the raw input alongside the structured output so the
-        # /brain/[id] detail page can offer a "Re-extract" action.
         workflow_id = save_workflow(
             workflow,
             source=source,
             source_metadata=source_metadata,
             raw_text=content,
+            org_id=org_id,
         )
     except Exception as exc:
-        # Don't block the response on persistence failures — the user still
-        # gets their workflow, /history just won't include this run.
         print(f"[workflow] save_workflow failed: {exc}", flush=True)
 
     if workflow_id:
         workflow["id"] = workflow_id
-        # Generate + persist the summary embedding so /api/v1/skills/match
-        # can find this skill. Lazy-imported to keep this module light.
         try:
             from brain.embedder import get_embedding
             from brain.store import update_skill_summary_embedding
@@ -372,14 +365,13 @@ def generate_workflow_from_text(
             summary_text = _build_skill_summary_text(workflow)
             if summary_text:
                 vec = get_embedding(summary_text)
-                update_skill_summary_embedding(workflow_id, vec)
+                update_skill_summary_embedding(workflow_id, vec, org_id=org_id)
         except Exception as exc:
             print(f"[workflow] summary embedding failed: {exc}", flush=True)
 
-        # Fire-and-forget drift check — never block the generation response.
         try:
             from brain.drift import schedule_drift_check
-            schedule_drift_check(content, workflow)
+            schedule_drift_check(content, workflow, org_id=org_id)
         except Exception as exc:
             print(f"[workflow] schedule_drift_check failed: {exc}", flush=True)
 

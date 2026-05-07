@@ -349,6 +349,11 @@ def _extract_workflow_async(
         "workspace": team_id,
     }
     try:
+        # Pass X-Org-ID for multi-tenancy. Self-hosted bots default to the
+        # ORG_ID env var; future per-workspace mapping would resolve from
+        # the Slack `team_id` instead.
+        org_id = os.environ.get("ORG_ID", "")
+        headers = {"X-Org-ID": org_id} if org_id else {}
         resp = requests.post(
             f"{FLOWITHM_API_URL}/workflows/generate",
             json={
@@ -357,6 +362,7 @@ def _extract_workflow_async(
                 "source": "slack",
                 "source_metadata": source_metadata,
             },
+            headers=headers,
             timeout=90,
         )
         resp.raise_for_status()
