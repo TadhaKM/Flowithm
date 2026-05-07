@@ -295,6 +295,9 @@ proxy times round-trip itself).
 | `STALE_THRESHOLD_DAYS` | `90` | Threshold for `run_staleness_check`. Read at call time. |
 | `GOOGLE_CLIENT_SECRET_PATH` | `client_secret.json` | One-shot Gmail OAuth bootstrap only. |
 | `ORG_ID` | `00000000-0000-0000-0000-000000000001` | Default tenant for self-hosted single-org deploys. Used as a fallback when no `X-Org-ID` header is present. Matches the seed row in `schema.sql`. |
+| `LOG_LEVEL` | `INFO` | Min level for `brain/logger.get_logger` loggers (DEBUG / INFO / WARNING / ERROR). |
+| `ANTHROPIC_TIMEOUT_SECONDS` | `60` | Per-call timeout for `brain/anthropic_client.messages_create`. Bump if generate_workflow_from_text runs long with adaptive thinking. |
+| `APP_VERSION` | `dev` | Surfaced by `GET /health` so probes can confirm which build is running. Set this in the deploy pipeline. |
 
 ### `ui/.env.local` (Next.js side)
 
@@ -356,7 +359,8 @@ authoritative; full message bodies via `git show <hash>`.
 | `4cc4616` | Multi-tenancy dashboard: `/setup` page, `flowithm_org_id` httpOnly cookie, Next.js middleware redirect, `lib/org.ts` helper, every proxy route forwards `X-Org-ID` (commit 3 of 3) |
 | `0195ed9` | Backfill commit hash in PROJECT.md build history |
 | `1febad9` | Structured JSON logger (`brain/logger.py`) + global FastAPI exception handlers; `print()` calls in scheduler / drift / embedder / staleness / query / api replaced with structured logs (commit 1 of 3) |
-| _(next)_ | Anthropic retry wrapper + circuit breaker (`brain/anthropic_client.py`); every direct `messages.create` call swapped to `messages_create()` (commit 2 of 3) |
+| `3540708` | Anthropic retry wrapper + circuit breaker (`brain/anthropic_client.py`); every direct `messages.create` call swapped to `messages_create()` (commit 2 of 3) |
+| _(next)_ | Real `/health` probe (Supabase + Anthropic + Voyage + scheduler + circuit-breaker checks) + `APP_VERSION` env (commit 3 of 3) |
 
 ---
 

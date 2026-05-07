@@ -21,10 +21,37 @@ def client():
 # ---------------------------------------------------------------------------
 
 def test_health_returns_status_and_chunk_count(client, monkeypatch):
+    """Health probe always returns a status, the legacy chunks_indexed
+    field for backward-compat, and a per-component checks map. The
+    real Supabase/Anthropic probes get monkeypatched so we test the
+    shape, not the live integrations."""
     monkeypatch.setattr("api.main._cached_chunk_count", lambda: 42)
+
+    # Stub the Supabase fetch to a benign success so we don't hit live infra.
+    class _FakeResult:
+        count = 7
+    class _FakeQuery:
+        def select(self, *a, **kw): return self
+        def limit(self, *a, **kw): return self
+        def execute(self): return _FakeResult()
+    class _FakeClient:
+        def table(self, *a, **kw): return _FakeQuery()
+    monkeypatch.setattr("brain.store.get_client", lambda: _FakeClient())
+    # Anthropic key needs the sk-ant- prefix to clear the format check.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setenv("VOYAGE_API_KEY", "voyage-test")
+
     res = client.get("/health")
     assert res.status_code == 200
-    assert res.json() == {"status": "ok", "chunks_indexed": 42}
+    body = res.json()
+    assert body["chunks_indexed"] == 42
+    assert body["status"] in ("ok", "degraded")
+    assert "checks" in body and isinstance(body["checks"], dict)
+    assert "version" in body
+    # The Supabase + Anthropic + Voyage probes should all clear with our stubs.
+    assert body["checks"]["supabase"] == "ok"
+    assert body["checks"]["anthropic"] == "ok"
+    assert body["checks"]["voyage"] == "ok"
 
 
 # ---------------------------------------------------------------------------

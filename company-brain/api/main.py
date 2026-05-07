@@ -371,7 +371,72 @@ def get_demo(slug: str) -> str:
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "chunks_indexed": _cached_chunk_count()}
+    """Real health probe — exercises every external dependency just enough
+    to know whether it's reachable, then returns a per-component status
+    map. Existing `chunks_indexed` field preserved for backward compat
+    with anything probing the old shape."""
+    checks: dict[str, str | int | dict | None] = {}
+
+    # Supabase: a tiny count-only query against an indexed column.
+    try:
+        from brain.store import get_client
+        result = (
+            get_client()
+            .table("skills")
+            .select("id", count="exact")
+            .limit(1)
+            .execute()
+        )
+        checks["supabase"] = "ok"
+        checks["skills_count"] = int(result.count or 0)
+    except Exception as exc:
+        checks["supabase"] = f"error: {exc}"
+
+    # Anthropic: format-check the key only — we don't burn a real call on
+    # every health probe.
+    key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not key:
+        checks["anthropic"] = "error: ANTHROPIC_API_KEY missing"
+    elif not key.startswith("sk-ant-"):
+        checks["anthropic"] = "warning: key format unexpected"
+    else:
+        checks["anthropic"] = "ok"
+
+    # Voyage: format-check the key.
+    voyage_key = os.environ.get("VOYAGE_API_KEY", "")
+    checks["voyage"] = "ok" if voyage_key else "error: VOYAGE_API_KEY missing"
+
+    # Scheduler: APScheduler running flag + last cycle summary.
+    try:
+        from brain.scheduler import scheduler
+        checks["scheduler"] = "ok" if scheduler.scheduler.running else "stopped"
+        checks["last_ingest"] = scheduler.last_run_summary
+    except Exception as exc:
+        checks["scheduler"] = f"error: {exc}"
+        checks["last_ingest"] = None
+
+    # Anthropic circuit breaker state — visible because it's the most
+    # likely source of degraded responses in normal operation.
+    try:
+        from brain.anthropic_client import _circuit_status
+        is_open, remaining = _circuit_status()
+        checks["anthropic_circuit"] = "open" if is_open else "closed"
+        if is_open:
+            checks["anthropic_circuit_reopen_seconds"] = int(remaining)
+    except Exception:
+        checks["anthropic_circuit"] = "unknown"
+
+    # Overall status: 'ok' iff every str-valued check is exactly 'ok' (or 'closed' for the circuit).
+    string_values = [v for v in checks.values() if isinstance(v, str)]
+    overall = "ok" if all(v in ("ok", "closed") for v in string_values) else "degraded"
+
+    return {
+        "status": overall,
+        "checks": checks,
+        "version": os.environ.get("APP_VERSION", "dev"),
+        # Backward-compat: callers probing the old shape still see this.
+        "chunks_indexed": _cached_chunk_count(),
+    }
 
 
 # ---------------------------------------------------------------------------
