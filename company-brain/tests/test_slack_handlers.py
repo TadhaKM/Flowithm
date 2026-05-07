@@ -10,13 +10,13 @@ import pytest
 
 pytest.importorskip("slack_bolt")
 
+from brain.text_utils import cap_tokens  # noqa: E402
 from slack.handlers import (  # noqa: E402
     DOC_URL_REGEX,
     MIN_WORDS,
     THREAD_WAIT_SECONDS,
     TOKEN_CAP,
     TRIGGER_REGEX,
-    _cap_tokens,
     _format_ts,
     _resolve_user_name,
 )
@@ -116,23 +116,23 @@ def test_format_ts_invalid_input_falls_back():
 
 def test_cap_tokens_no_op_below_cap():
     text = "this is well under the cap"
-    assert _cap_tokens(text, 1000) == text
+    assert cap_tokens(text, 1000, strategy="middle_out") == text
 
 
 def test_cap_tokens_truncates_with_marker_above_cap():
     long_text = " ".join(["alpha"] * 5000)  # ~5000 tokens
-    out = _cap_tokens(long_text, 200)
-    assert "tokens omitted" in out
+    out = cap_tokens(long_text, 200, strategy="middle_out")
+    assert "middle removed" in out
     # It's still much shorter than the original.
     assert len(out) < len(long_text)
 
 
 def test_cap_tokens_keeps_head_and_tail():
-    """The truncation strategy is head + omission marker + tail."""
+    """The middle_out strategy is head + omission marker + tail."""
     body = " ".join([f"head{i}" for i in range(400)])
     body += " " + " ".join([f"middle{i}" for i in range(2000)])
     body += " " + " ".join([f"tail{i}" for i in range(400)])
-    out = _cap_tokens(body, 400)
+    out = cap_tokens(body, 400, strategy="middle_out")
     assert "head0" in out  # head preserved
     assert "tail399" in out  # tail preserved
     # Middle dropped

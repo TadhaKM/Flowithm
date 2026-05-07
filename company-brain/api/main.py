@@ -31,6 +31,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
+from brain.drift import (
+    get_conflict_history,
+    get_unresolved_conflicts,
+    resolve_conflict,
+)
 from brain.query import (
     generate_skills_file,
     generate_workflow_from_text,
@@ -79,6 +84,11 @@ class WorkflowRequest(BaseModel):
     source_metadata: dict | None = None
 
 
+class ConflictResolveRequest(BaseModel):
+    action: str  # 'accept' | 'dismiss' | 'snooze'
+    resolved_by: str
+
+
 # ---------------------------------------------------------------------------
 # Response model for /skills — must mirror SKILL_SCHEMA in brain/query.py.
 # (Distinct from the /workflows/generate shape, which has description +
@@ -118,6 +128,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Mount the public Agent API sub-app at /api/v1. Sub-app gets its own
+# /api/v1/openapi.json + /api/v1/docs (Swagger UI).
+from api.agent import agent_app  # noqa: E402
+
+app.mount("/api/v1", agent_app)
 
 
 @app.post("/query")
@@ -200,3 +216,32 @@ def get_demo(slug: str) -> str:
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok", "chunks_indexed": _cached_chunk_count()}
+
+
+# ---------------------------------------------------------------------------
+# Drift / conflicts
+# ---------------------------------------------------------------------------
+
+@app.get("/conflicts")
+def conflicts(include_snoozed: bool = False) -> list[dict]:
+    """Unresolved drift conflicts. Pass ?include_snoozed=true to also list snoozed ones."""
+    return get_unresolved_conflicts(include_snoozed=include_snoozed)
+
+
+@app.post("/conflicts/{conflict_id}/resolve")
+def resolve_conflict_endpoint(conflict_id: str, req: ConflictResolveRequest) -> dict:
+    """Apply 'accept' | 'dismiss' | 'snooze' to a conflict."""
+    if req.action not in {"accept", "dismiss", "snooze"}:
+        raise HTTPException(400, f"unknown action: {req.action!r}")
+    try:
+        return resolve_conflict(conflict_id, req.action, req.resolved_by)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.get("/skills/{skill_id}/conflicts")
+def skill_conflicts(skill_id: str) -> list[dict]:
+    """Full conflict history for a single skill — any status."""
+    return get_conflict_history(skill_id)

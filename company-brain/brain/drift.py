@@ -1,0 +1,535 @@
+"""Drift detection — does new content contradict any existing skill?
+
+Triggered after every workflow generation (UI or Slack). Pulls non-archived
+skills, ranks the most semantically similar (cosine over Voyage embeddings),
+asks Claude for genuine conflicts, persists them in the conflicts table.
+
+Public surface:
+    check_for_drift(new_content, new_skill)         — run + persist; returns conflicts
+    schedule_drift_check(new_content, new_skill)    — fire-and-forget (daemon thread)
+    resolve_conflict(id, action, resolved_by)       — accept | dismiss | snooze
+    get_unresolved_conflicts(include_snoozed=False) — feed for /conflicts
+    get_conflict_history(skill_id)                  — full history per skill
+"""
+from __future__ import annotations
+
+import json
+import math
+import threading
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+import anthropic
+from dotenv import load_dotenv
+
+from brain.embedder import get_embedding, get_embeddings_batch
+from brain.store import get_client, save_workflow
+
+load_dotenv()
+
+MODEL = "claude-sonnet-4-6"
+SKILLS_TABLE = "skills"
+CONFLICTS_TABLE = "conflicts"
+CANDIDATES_LIMIT = 20
+SNOOZE_DAYS = 7
+
+DRIFT_SYSTEM_PROMPT = (
+    "You are a knowledge consistency checker. You compare new company "
+    "knowledge against existing documented processes and identify "
+    "contradictions, updates, or conflicts. Be specific and precise. "
+    "Only flag genuine conflicts — not minor wording differences."
+)
+
+APPLY_UPDATE_SYSTEM_PROMPT = (
+    "You apply a single update instruction to an existing structured "
+    "workflow JSON. Preserve the original structure and only modify the "
+    "fields the update instruction targets. Return the full updated "
+    "workflow as JSON in the same shape as the input."
+)
+
+DRIFT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "conflicts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "existing_skill_id": {"type": "string"},
+                    "existing_process_name": {"type": "string"},
+                    "conflict_type": {"type": "string", "enum": ["contradiction", "update", "expansion", "deprecation"]},
+                    "conflict_description": {"type": "string"},
+                    "existing_rule": {"type": "string"},
+                    "new_evidence": {"type": "string"},
+                    "suggested_update": {"type": "string"},
+                    "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+                },
+                "required": [
+                    "existing_skill_id", "existing_process_name", "conflict_type",
+                    "conflict_description", "existing_rule", "new_evidence",
+                    "suggested_update", "severity",
+                ],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["conflicts"],
+    "additionalProperties": False,
+}
+
+# Mirrors WORKFLOW_SCHEMA in brain/query.py so save_workflow round-trips.
+_WORKFLOW_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "process": {"type": "string"},
+        "description": {"type": "string"},
+        "trigger": {"type": "string"},
+        "steps": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "step": {"type": "integer"},
+                    "action": {"type": "string"},
+                    "owner": {"type": "string"},
+                    "notes": {"type": "string"},
+                },
+                "required": ["step", "action", "owner", "notes"],
+                "additionalProperties": False,
+            },
+        },
+        "decision_rules": {"type": "array", "items": {"type": "string"}},
+        "approvals": {"type": "array", "items": {"type": "string"}},
+        "exceptions": {"type": "array", "items": {"type": "string"}},
+        "sources": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": [
+        "process", "description", "trigger", "steps",
+        "decision_rules", "approvals", "exceptions", "sources",
+    ],
+    "additionalProperties": False,
+}
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _iso_to_epoch(iso: str) -> int:
+    if not iso:
+        return 0
+    try:
+        return int(datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp())
+    except Exception:
+        return 0
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    if not a or not b:
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    return dot / (na * nb) if na and nb else 0.0
+
+
+def _skill_summary(skill: dict[str, Any]) -> str:
+    """Concatenate the most semantically meaningful fields of a skill row."""
+    parts = [
+        skill.get("process_name") or "",
+        skill.get("description") or "",
+        skill.get("process_trigger") or "",
+    ]
+    for s in (skill.get("steps") or [])[:5]:
+        parts.append(str(s.get("action") or ""))
+    for r in (skill.get("decision_rules") or [])[:3]:
+        parts.append(str(r))
+    return "\n".join(p for p in parts if p)
+
+
+def _rank_candidates(new_content: str, skills: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    """Top-N skills by cosine similarity of new_content vs skill summary embeddings.
+
+    Embeds skills on-the-fly via Voyage (no schema change). Acceptable while
+    skill counts are dozens; if the corpus grows past ~hundreds, persist
+    skill embeddings on the skills table and search with pgvector instead.
+    """
+    if len(skills) <= limit:
+        return skills
+    summaries = [_skill_summary(s) for s in skills]
+    skill_vecs = get_embeddings_batch(summaries)
+    query_vec = get_embedding(new_content)
+    scored = sorted(
+        zip(skills, (_cosine(query_vec, v) for v in skill_vecs)),
+        key=lambda kv: kv[1],
+        reverse=True,
+    )
+    return [s for s, _ in scored[:limit]]
+
+
+def _strip_for_llm(skill: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(skill.get("id") or ""),
+        "process": skill.get("process_name") or "",
+        "description": skill.get("description") or "",
+        "trigger": skill.get("process_trigger") or "",
+        "steps": skill.get("steps") or [],
+        "decision_rules": skill.get("decision_rules") or [],
+        "approvals": skill.get("approvals") or [],
+        "exceptions": skill.get("exceptions") or [],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Public: check
+# ---------------------------------------------------------------------------
+
+def check_for_drift(new_content: str, new_skill: dict[str, Any]) -> list[dict[str, Any]]:
+    """Run the consistency check; persist any conflicts; return the inserted rows.
+
+    Always non-raising — failures are logged and yield an empty list so
+    callers (background threads, generation hooks) don't crash on transient
+    Supabase or Anthropic issues.
+    """
+    try:
+        client = get_client()
+        new_skill_id = new_skill.get("id")
+
+        result = (
+            client.table(SKILLS_TABLE)
+            .select("*")
+            .eq("archived", False)
+            .execute()
+        )
+        skills_rows = [r for r in (result.data or []) if str(r.get("id")) != str(new_skill_id or "")]
+        if not skills_rows:
+            return []
+
+        candidates = _rank_candidates(new_content, skills_rows, CANDIDATES_LIMIT)
+        existing_subset = [_strip_for_llm(s) for s in candidates]
+
+        anthropic_client = anthropic.Anthropic()
+        user_message = (
+            "New process just extracted:\n"
+            f"{json.dumps(new_skill, indent=2, ensure_ascii=False, default=str)}\n\n"
+            "Existing skills files to check against:\n"
+            f"{json.dumps(existing_subset, indent=2, ensure_ascii=False, default=str)}\n\n"
+            "Return a JSON object with a `conflicts` array. Each conflict requires "
+            "existing_skill_id (use the id from the existing skills above), "
+            "existing_process_name, conflict_type "
+            "(contradiction|update|expansion|deprecation), conflict_description "
+            "(one clear sentence), existing_rule (the specific rule that conflicts), "
+            "new_evidence (the specific part of new content that conflicts), "
+            "suggested_update (exactly how the existing skill should change), "
+            "severity (high|medium|low). Return an empty array if no genuine "
+            "conflicts exist."
+        )
+
+        message = anthropic_client.messages.create(
+            model=MODEL,
+            max_tokens=4096,
+            system=[{"type": "text", "text": DRIFT_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+            thinking={"type": "adaptive"},
+            output_config={
+                "effort": "medium",
+                "format": {"type": "json_schema", "schema": DRIFT_SCHEMA},
+            },
+            messages=[{"role": "user", "content": user_message}],
+        )
+        if message.stop_reason == "refusal":
+            print("[drift] Claude refused drift check", flush=True)
+            return []
+
+        text = next((b.text for b in message.content if b.type == "text"), "")
+        parsed = json.loads(text or "{}")
+        raw_conflicts = parsed.get("conflicts") or []
+        if not raw_conflicts:
+            return []
+
+        candidate_ids = {str(c.get("id") or "") for c in candidates}
+        rows = []
+        for c in raw_conflicts:
+            existing_id = str(c.get("existing_skill_id") or "")
+            if existing_id not in candidate_ids:
+                # Defend against hallucinated skill ids.
+                continue
+            rows.append({
+                "existing_skill_id": existing_id,
+                "new_skill_id": str(new_skill_id) if new_skill_id else None,
+                "existing_process_name": c.get("existing_process_name") or "",
+                "conflict_type": c.get("conflict_type"),
+                "conflict_description": c.get("conflict_description") or "",
+                "existing_rule": c.get("existing_rule") or "",
+                "new_evidence": c.get("new_evidence") or "",
+                "suggested_update": c.get("suggested_update") or "",
+                "severity": c.get("severity") or "medium",
+            })
+
+        if not rows:
+            return []
+        insert = client.table(CONFLICTS_TABLE).insert(rows).execute()
+        inserted = insert.data or []
+        print(f"[drift] {len(inserted)} conflict(s) recorded for {new_skill.get('process','?')}", flush=True)
+        return inserted
+
+    except Exception as exc:
+        print(f"[drift] check_for_drift failed: {exc}", flush=True)
+        return []
+
+
+def schedule_drift_check(new_content: str, new_skill: dict[str, Any]) -> None:
+    """Fire-and-forget: run check_for_drift in a daemon thread."""
+    def _worker():
+        try:
+            check_for_drift(new_content, new_skill)
+        except Exception as exc:
+            print(f"[drift] background check failed: {exc}", flush=True)
+    threading.Thread(target=_worker, daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
+# Public: list / history
+# ---------------------------------------------------------------------------
+
+def get_unresolved_conflicts(include_snoozed: bool = False) -> list[dict[str, Any]]:
+    """Conflicts still needing a decision.
+
+    `include_snoozed=True` returns 'unresolved' + every 'snoozed' row.
+    Default behaviour also surfaces 'snoozed' rows whose snoozed_until has
+    already passed (they're actionable again).
+    """
+    client = get_client()
+    if include_snoozed:
+        rows = (
+            client.table(CONFLICTS_TABLE)
+            .select("*")
+            .in_("status", ["unresolved", "snoozed"])
+            .order("created_at", desc=True)
+            .execute()
+        ).data or []
+    else:
+        unresolved = (
+            client.table(CONFLICTS_TABLE)
+            .select("*")
+            .eq("status", "unresolved")
+            .order("created_at", desc=True)
+            .execute()
+        ).data or []
+        snoozed_expired = (
+            client.table(CONFLICTS_TABLE)
+            .select("*")
+            .eq("status", "snoozed")
+            .lt("snoozed_until", _now_iso())
+            .order("created_at", desc=True)
+            .execute()
+        ).data or []
+        rows = unresolved + snoozed_expired
+
+    sev_rank = {"high": 0, "medium": 1, "low": 2}
+    rows.sort(key=lambda r: (
+        sev_rank.get(r.get("severity"), 3),
+        -_iso_to_epoch(r.get("created_at") or ""),
+    ))
+
+    _hydrate_skill_meta(client, rows)
+    return rows
+
+
+def get_conflict_history(skill_id: str) -> list[dict[str, Any]]:
+    """Every conflict (any status) for a given skill_id, newest first."""
+    client = get_client()
+    result = (
+        client.table(CONFLICTS_TABLE)
+        .select("*")
+        .eq("existing_skill_id", skill_id)
+        .order("created_at", desc=True)
+        .execute()
+    )
+    rows = result.data or []
+    _hydrate_skill_meta(client, rows)
+    return rows
+
+
+def _hydrate_skill_meta(client, rows: list[dict[str, Any]]) -> None:
+    """Annotate each row with the live process_name/trigger and a
+    `targets_archived_version` flag based on the referenced skill's
+    archived state. UI uses this to gate the Accept button."""
+    skill_ids = list({r["existing_skill_id"] for r in rows if r.get("existing_skill_id")})
+    skill_meta: dict[str, dict[str, Any]] = {}
+    if skill_ids:
+        sk = (
+            client.table(SKILLS_TABLE)
+            .select("id,process_name,process_trigger,archived")
+            .in_("id", skill_ids)
+            .execute()
+        )
+        for s in sk.data or []:
+            skill_meta[str(s["id"])] = {
+                "process_name": s.get("process_name") or "",
+                "trigger": s.get("process_trigger") or "",
+                "archived": bool(s.get("archived")),
+            }
+    for r in rows:
+        sid = str(r.get("existing_skill_id") or "")
+        meta = skill_meta.get(sid, {})
+        r["existing_process_trigger"] = meta.get("trigger", "")
+        if meta.get("process_name"):
+            r["existing_process_name"] = meta["process_name"]
+        # If the skill row is gone (deleted) we can't accept either — treat
+        # as targets_archived_version=true so the UI keeps Accept disabled.
+        r["targets_archived_version"] = meta.get("archived", True) if meta else True
+
+
+# ---------------------------------------------------------------------------
+# Public: resolve
+# ---------------------------------------------------------------------------
+
+def resolve_conflict(conflict_id: str, action: str, resolved_by: str) -> dict[str, Any]:
+    """Apply 'accept' | 'dismiss' | 'snooze' to a conflict.
+
+    accept   -> Claude rewrites the existing skill per suggested_update,
+                saves a NEW skills row with version + 1 + previous_version_id,
+                archives the old row, marks the conflict accepted; returns
+                the new workflow JSON (with id, version).
+    dismiss  -> marks the conflict dismissed; returns the conflict row.
+    snooze   -> status='snoozed', snoozed_until = now + SNOOZE_DAYS;
+                returns the conflict row.
+    """
+    if action not in {"accept", "dismiss", "snooze"}:
+        raise ValueError(f"unknown action: {action!r}")
+
+    client = get_client()
+    fetched = (
+        client.table(CONFLICTS_TABLE)
+        .select("*")
+        .eq("id", conflict_id)
+        .limit(1)
+        .execute()
+    )
+    rows = fetched.data or []
+    if not rows:
+        raise LookupError(f"conflict not found: {conflict_id}")
+    conflict = rows[0]
+
+    if action == "dismiss":
+        return _update_conflict_status(client, conflict_id, {
+            "status": "dismissed",
+            "resolved_by": resolved_by,
+            "resolved_at": _now_iso(),
+        })
+
+    if action == "snooze":
+        until = (datetime.now(timezone.utc) + timedelta(days=SNOOZE_DAYS)).isoformat()
+        return _update_conflict_status(client, conflict_id, {
+            "status": "snoozed",
+            "snoozed_until": until,
+            "resolved_by": resolved_by,
+            "resolved_at": _now_iso(),
+        })
+
+    # accept
+    skill_resp = (
+        client.table(SKILLS_TABLE)
+        .select("*")
+        .eq("id", conflict["existing_skill_id"])
+        .limit(1)
+        .execute()
+    )
+    skill_rows = skill_resp.data or []
+    if not skill_rows:
+        raise LookupError(f"existing skill not found: {conflict['existing_skill_id']}")
+    old_skill = skill_rows[0]
+    if old_skill.get("archived"):
+        # The UI disables Accept in this case; this is the API-level guard
+        # so a stale request can't fork from an archived version.
+        raise ValueError(
+            "cannot accept a conflict that targets an archived version of the skill — "
+            "dismiss it and re-run drift detection if still relevant"
+        )
+
+    updated_workflow = _apply_update_via_claude(old_skill, conflict["suggested_update"])
+
+    new_id = save_workflow(
+        updated_workflow,
+        source=old_skill.get("source") or "manual",
+        source_metadata=old_skill.get("source_metadata") or {},
+        raw_text=old_skill.get("raw_text") or "",
+    )
+    new_version = int(old_skill.get("version") or 1) + 1
+    client.table(SKILLS_TABLE).update({
+        "version": new_version,
+        "previous_version_id": old_skill["id"],
+    }).eq("id", new_id).execute()
+
+    client.table(SKILLS_TABLE).update({
+        "archived": True,
+        "archived_at": _now_iso(),
+    }).eq("id", old_skill["id"]).execute()
+
+    # Cascade: re-target every OTHER unresolved conflict that pointed at the
+    # now-archived skill onto the freshly-saved new version, so they stay
+    # actionable. The just-accepted conflict still has status='unresolved' at
+    # this point, so the explicit neq("id", ...) keeps it untouched (we mark
+    # it 'accepted' immediately below).
+    client.table(CONFLICTS_TABLE).update({
+        "existing_skill_id": new_id,
+    }).eq("existing_skill_id", old_skill["id"]).eq("status", "unresolved").neq("id", conflict_id).execute()
+
+    client.table(CONFLICTS_TABLE).update({
+        "status": "accepted",
+        "new_skill_id": new_id,
+        "resolved_by": resolved_by,
+        "resolved_at": _now_iso(),
+    }).eq("id", conflict_id).execute()
+
+    updated_workflow["id"] = new_id
+    updated_workflow["version"] = new_version
+    updated_workflow["previous_version_id"] = str(old_skill["id"])
+    return updated_workflow
+
+
+def _update_conflict_status(client, conflict_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+    result = client.table(CONFLICTS_TABLE).update(patch).eq("id", conflict_id).execute()
+    rows = result.data or []
+    if not rows:
+        raise LookupError(f"conflict update returned no row: {conflict_id}")
+    return rows[0]
+
+
+def _apply_update_via_claude(old_skill: dict[str, Any], suggested_update: str) -> dict[str, Any]:
+    """Mechanically apply the suggested_update to an existing workflow JSON."""
+    workflow = {
+        "process": old_skill.get("process_name") or "",
+        "description": old_skill.get("description") or "",
+        "trigger": old_skill.get("process_trigger") or "",
+        "steps": old_skill.get("steps") or [],
+        "decision_rules": old_skill.get("decision_rules") or [],
+        "approvals": old_skill.get("approvals") or [],
+        "exceptions": old_skill.get("exceptions") or [],
+        "sources": old_skill.get("sources") or [],
+    }
+    user_message = (
+        f"Existing workflow:\n{json.dumps(workflow, indent=2, ensure_ascii=False)}\n\n"
+        f"Update instruction:\n{suggested_update}\n\n"
+        "Return the full updated workflow JSON, preserving fields not mentioned in the instruction."
+    )
+    client = anthropic.Anthropic()
+    message = client.messages.create(
+        model=MODEL,
+        max_tokens=4096,
+        system=[{"type": "text", "text": APPLY_UPDATE_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+        thinking={"type": "adaptive"},
+        output_config={
+            "effort": "medium",
+            "format": {"type": "json_schema", "schema": _WORKFLOW_SCHEMA},
+        },
+        messages=[{"role": "user", "content": user_message}],
+    )
+    if message.stop_reason == "refusal":
+        raise RuntimeError("Claude refused to apply the update")
+    text = next((b.text for b in message.content if b.type == "text"), "")
+    return json.loads(text or "{}")

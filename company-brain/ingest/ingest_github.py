@@ -1,12 +1,15 @@
-"""Ingest github_issues.json into chunk dicts.
+"""Ingest github_issues.json into Chunks.
 
-Each issue (title + body + all comments) becomes one chunk.
-
-Standalone for now: prints chunks to stdout as JSON, count to stderr.
+Each issue (title + body + all comments) becomes one chunk; oversized issues
+are truncated via cap_tokens.
 """
 import json
 import sys
+from dataclasses import asdict
 from pathlib import Path
+
+from brain.ingestors import BaseIngestor, Chunk
+from brain.text_utils import cap_tokens
 
 DEMO_PATH = Path(__file__).resolve().parent.parent / "demo-data" / "github_issues.json"
 
@@ -29,26 +32,27 @@ def format_issue(issue: dict) -> str:
     return "\n".join(parts)
 
 
-def build_chunks(issues: list[dict]) -> list[dict]:
-    chunks = []
-    for issue in issues:
-        chunks.append({
-            "source_type": "github",
-            "source_name": f"#{issue['number']}: {issue['title']}",
-            "content": format_issue(issue),
-            "metadata": {
-                "number": issue["number"],
-                "labels": issue.get("labels", []),
-                "state": issue["state"],
-            },
-        })
-    return chunks
+class GitHubIngestor(BaseIngestor):
+    def build_chunks(self, issues: list[dict]) -> list[Chunk]:
+        chunks: list[Chunk] = []
+        for issue in issues:
+            content = cap_tokens(format_issue(issue), self.MAX_CHUNK_TOKENS, strategy="truncate")
+            chunks.append(Chunk(
+                source_type="github",
+                source_name=f"#{issue['number']}: {issue['title']}",
+                content=content,
+                metadata={
+                    "number": issue["number"],
+                    "labels": issue.get("labels", []),
+                    "state": issue["state"],
+                },
+            ))
+        return chunks
 
 
 def main() -> None:
-    issues = load_issues(DEMO_PATH)
-    chunks = build_chunks(issues)
-    print(json.dumps(chunks, indent=2))
+    chunks = GitHubIngestor().process(load_issues(DEMO_PATH))
+    print(json.dumps([asdict(c) for c in chunks], indent=2))
     print(f"Produced {len(chunks)} chunks.", file=sys.stderr)
 
 

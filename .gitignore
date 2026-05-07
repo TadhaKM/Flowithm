@@ -1,0 +1,8 @@
+# Local Claude Code config (user-specific)
+.claude/
+
+# Graphify outputs
+graphify-out/
+
+# TypeScript build cache
+**/*.tsbuildinfo

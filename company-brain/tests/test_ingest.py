@@ -1,10 +1,7 @@
 """ingest.* — chunk-builder pure logic for each source type."""
-from ingest.ingest_github import build_chunks as github_build_chunks
-from ingest.ingest_github import format_issue
-from ingest.ingest_notion import build_chunks as notion_build_chunks
-from ingest.ingest_notion import parse_sections
-from ingest.ingest_slack import build_chunks as slack_build_chunks
-from ingest.ingest_slack import group_threads
+from ingest.ingest_github import GitHubIngestor, format_issue
+from ingest.ingest_notion import NotionIngestor, parse_sections
+from ingest.ingest_slack import SlackIngestor, group_threads
 
 
 # ---------------------------------------------------------------------------
@@ -48,13 +45,13 @@ def test_slack_build_chunks_marks_source_and_metadata():
     messages = [
         {"channel": "general", "user": "alice", "ts": "100.0", "text": "lorem ipsum dolor sit amet"}
     ]
-    chunks = slack_build_chunks(messages)
+    chunks = SlackIngestor().build_chunks(messages)
     assert len(chunks) >= 1
     c = chunks[0]
-    assert c["source_type"] == "slack"
-    assert c["source_name"] == "general"
-    assert c["metadata"]["author"] == "alice"
-    assert c["metadata"]["timestamp"] == "100.0"
+    assert c.source_type == "slack"
+    assert c.source_name == "general"
+    assert c.metadata["author"] == "alice"
+    assert c.metadata["timestamp"] == "100.0"
 
 
 def test_slack_build_chunks_marks_thread_metadata_when_threaded():
@@ -62,10 +59,10 @@ def test_slack_build_chunks_marks_thread_metadata_when_threaded():
         {"channel": "g", "user": "u1", "ts": "1.0", "text": "parent message body"},
         {"channel": "g", "user": "u2", "ts": "2.0", "thread_ts": "1.0", "text": "reply body"},
     ]
-    chunks = slack_build_chunks(messages)
+    chunks = SlackIngestor().build_chunks(messages)
     # Both messages collapse into one chunk (thread)
     assert len(chunks) == 1
-    assert chunks[0]["metadata"].get("thread_ts") == "1.0"
+    assert chunks[0].metadata.get("thread_ts") == "1.0"
 
 
 # ---------------------------------------------------------------------------
@@ -110,12 +107,12 @@ def test_notion_h3_does_not_split_section():
     assert "H3 inside" in s1["body"]
 
 
-def test_notion_build_chunks_skips_empty_sections():
-    """Sections with empty bodies are dropped (e.g. an H1 immediately followed by H2)."""
-    md = "# Page\n\n## S1\n\n## S2\n\nactual body\n"
-    chunks = notion_build_chunks(md)
-    sources = [c["source_name"] for c in chunks]
-    assert "S1" not in sources  # empty body, dropped
+def test_notion_process_skips_empty_sections():
+    """Sections with empty bodies are dropped by validate() (e.g. an H1 immediately followed by H2)."""
+    md = "# Page\n\n## S1\n\n## S2\n\nactual body content here please\n"
+    chunks = NotionIngestor().process(md)
+    sources = [c.source_name for c in chunks]
+    assert "S1" not in sources  # empty body, dropped by validate()
     assert "S2" in sources
 
 
@@ -162,14 +159,14 @@ def test_github_build_chunks_one_per_issue():
         _basic_issue(number=1, title="A"),
         _basic_issue(number=2, title="B", state="closed", labels=["bug"]),
     ]
-    chunks = github_build_chunks(issues)
+    chunks = GitHubIngestor().build_chunks(issues)
     assert len(chunks) == 2
-    assert chunks[0]["source_name"] == "#1: A"
-    assert chunks[0]["metadata"]["state"] == "open"
-    assert chunks[1]["metadata"]["state"] == "closed"
-    assert chunks[1]["metadata"]["labels"] == ["bug"]
+    assert chunks[0].source_name == "#1: A"
+    assert chunks[0].metadata["state"] == "open"
+    assert chunks[1].metadata["state"] == "closed"
+    assert chunks[1].metadata["labels"] == ["bug"]
 
 
 def test_github_chunks_marked_as_github_source():
-    chunks = github_build_chunks([_basic_issue()])
-    assert chunks[0]["source_type"] == "github"
+    chunks = GitHubIngestor().build_chunks([_basic_issue()])
+    assert chunks[0].source_type == "github"

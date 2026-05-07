@@ -165,6 +165,16 @@ WORKFLOW_SCHEMA: dict[str, Any] = {
 }
 
 
+def _build_skill_summary_text(workflow: dict[str, Any]) -> str:
+    """Concatenated text we embed for /api/v1/skills/match's similarity index."""
+    parts = [
+        workflow.get("process") or "",
+        workflow.get("trigger") or "",
+        " ".join(workflow.get("decision_rules") or []),
+    ]
+    return " ".join(p for p in parts if p).strip()
+
+
 def _confidence(scores: list[float]) -> str:
     """Map similarity scores from match_chunks (1 - cosine distance) to a label.
 
@@ -353,6 +363,30 @@ def generate_workflow_from_text(
 
     if workflow_id:
         workflow["id"] = workflow_id
+        # Generate + persist the summary embedding so /api/v1/skills/match
+        # can find this skill. Lazy-imported to keep this module light.
+        try:
+            from brain.embedder import get_embedding
+            from brain.store import update_skill_summary_embedding
+
+            summary_text = _build_skill_summary_text(workflow)
+            if summary_text:
+                vec = get_embedding(summary_text)
+                update_skill_summary_embedding(workflow_id, vec)
+        except Exception as exc:
+            print(f"[workflow] summary embedding failed: {exc}", flush=True)
+
+        # Fire-and-forget drift check — never block the generation response.
+        try:
+            from brain.drift import schedule_drift_check
+            schedule_drift_check(content, workflow)
+        except Exception as exc:
+            print(f"[workflow] schedule_drift_check failed: {exc}", flush=True)
+
+    # Forward-compat: response shape always includes a `conflicts` key. The
+    # real list arrives via GET /conflicts once the background drift check
+    # completes (typically a few seconds after this returns).
+    workflow.setdefault("conflicts", [])
     return workflow
 
 

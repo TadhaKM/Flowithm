@@ -21,10 +21,10 @@ from typing import Any
 
 import anthropic
 import requests
-import tiktoken
 from slack_bolt import App
 from slack_sdk.web import WebClient
 
+from brain.text_utils import cap_tokens
 from slack.formatter import (
     build_confirmation_blocks,
     build_error_blocks,
@@ -82,17 +82,6 @@ DOC_URL_REGEX = re.compile(
     r"https?://(?:[\w-]+\.)?(?:notion\.so|notion\.site|docs\.google\.com)/[^\s>|]+",
     re.IGNORECASE,
 )
-
-# tiktoken encoder — module-level cache so we don't re-instantiate per call.
-_encoding = None
-
-
-def _enc():
-    global _encoding
-    if _encoding is None:
-        _encoding = tiktoken.get_encoding("cl100k_base")
-    return _encoding
-
 
 _anthropic_client: anthropic.Anthropic | None = None
 
@@ -421,6 +410,57 @@ def _extract_workflow_async(
     except Exception as exc:
         print(f"[extract] response chat_update failed: {exc}", flush=True)
 
+    # 9) Drift check (inline — we're already off the Slack ack thread). If
+    # genuine conflicts surface, post a follow-up in the same thread so the
+    # user sees them without leaving Slack.
+    if workflow_id:
+        try:
+            from brain.drift import check_for_drift
+            conflicts = check_for_drift(thread_text, workflow)
+            if conflicts:
+                _post_drift_followup(client, channel_id, thread_ts, conflicts)
+        except Exception as exc:
+            print(f"[extract] drift check failed: {exc}", flush=True)
+
+
+def _post_drift_followup(
+    client: WebClient,
+    channel_id: str,
+    thread_ts: str,
+    conflicts: list[dict[str, Any]],
+) -> None:
+    """Post a thread reply summarising drift conflicts. Posts the highest-severity
+    conflict in full + a "+N more" hint when there are several."""
+    sev_rank = {"high": 0, "medium": 1, "low": 2}
+    sorted_conflicts = sorted(conflicts, key=lambda c: sev_rank.get(c.get("severity"), 3))
+    top = sorted_conflicts[0]
+    extras = len(sorted_conflicts) - 1
+    review_link = f"{FLOWITHM_URL}/brain"
+
+    lines = [
+        f"*Flowithm detected a potential conflict with an existing workflow:*",
+        "",
+        top.get("conflict_description") or "",
+        "",
+        f"*Existing:* {top.get('existing_rule') or '—'}",
+        f"*New evidence:* {top.get('new_evidence') or '—'}",
+    ]
+    if extras > 0:
+        lines.append("")
+        lines.append(f"_+{extras} more conflict(s) — see Flowithm to review them all._")
+    lines.append("")
+    lines.append(f"Review and update in Flowithm → {review_link}")
+
+    try:
+        client.chat_postMessage(
+            channel=channel_id,
+            thread_ts=thread_ts,
+            text="\n".join(lines),
+            mrkdwn=True,
+        )
+    except Exception as exc:
+        print(f"[drift] follow-up post failed: {exc}", flush=True)
+
 
 def _post_json_snippet(
     client: WebClient,
@@ -609,7 +649,7 @@ def _collect_thread(client: WebClient, channel: str, thread_ts: str) -> tuple[st
             formatted.append(f"[linked doc: {url}]")
 
     full = "\n".join(formatted)
-    return _cap_tokens(full, TOKEN_CAP), len(raw_messages)
+    return cap_tokens(full, TOKEN_CAP, strategy="middle_out"), len(raw_messages)
 
 
 def _resolve_user_name(client: WebClient, user_id: str, cache: dict[str, str]) -> str:
@@ -639,19 +679,6 @@ def _format_ts(ts: str) -> str:
         )
     except Exception:
         return ts
-
-
-def _cap_tokens(text: str, cap: int) -> str:
-    """If `text` exceeds `cap` tokens, keep the first half and last half."""
-    enc = _enc()
-    tokens = enc.encode(text)
-    if len(tokens) <= cap:
-        return text
-    half = cap // 2
-    head = enc.decode(tokens[:half])
-    tail = enc.decode(tokens[-half:])
-    omitted = len(tokens) - cap
-    return f"{head}\n\n[… {omitted} tokens omitted …]\n\n{tail}"
 
 
 def _detect_process_name(thread_text: str) -> str:

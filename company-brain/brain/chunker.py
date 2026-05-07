@@ -1,7 +1,5 @@
 """Token-aware text chunker."""
-import tiktoken
-
-ENCODING = tiktoken.get_encoding("cl100k_base")
+from brain.text_utils import ENCODING, count_tokens  # noqa: F401  (count_tokens re-exported for callers)
 
 
 def chunk_text(text: str, max_tokens: int = 500, overlap: int = 50) -> list[str]:

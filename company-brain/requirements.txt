@@ -6,6 +6,8 @@ uvicorn
 pypdf2
 python-dotenv
 tiktoken
+bcrypt
+apscheduler>=3.10.0
 
 # dev — testing
 pytest

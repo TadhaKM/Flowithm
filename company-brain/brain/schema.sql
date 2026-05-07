@@ -47,6 +47,14 @@ create table if not exists chunks (
     created_at   timestamptz    not null default now()
 );
 
+-- Idempotent migrations for chunks. Re-runnable; each ALTER is a no-op once
+-- the column exists. content_hash + the unique index back the dedup logic
+-- in brain/embedder.store_chunk: re-ingesting identical content updates
+-- source_name + metadata + updated_at instead of creating a duplicate row.
+alter table chunks add column if not exists content_hash text;
+alter table chunks add column if not exists updated_at   timestamptz default now();
+create unique index if not exists chunks_content_hash_idx on chunks (content_hash);
+
 
 -- ---------------------------------------------------------------------------
 -- skills
@@ -122,6 +130,11 @@ alter table skills add column if not exists raw_text        text not null defaul
 alter table skills add column if not exists reviewed_at     timestamptz;
 alter table skills alter column description set default '';
 
+-- Versioning: when a drift "accept" lands, the new row gets version = old + 1
+-- and previous_version_id = the archived row's id.
+alter table skills add column if not exists version              integer default 1;
+alter table skills add column if not exists previous_version_id  uuid references skills(id);
+
 -- GIN trigram index makes similarity(process_name, ?) searches cheap.
 -- Used by the find_similar_workflow RPC below (Slack bot's "Update existing"
 -- detection). Optional — without it queries still work, just slower at scale.
@@ -130,6 +143,206 @@ create index if not exists skills_process_name_trgm_idx
     using gin (process_name gin_trgm_ops);
 
 create index if not exists skills_archived_idx on skills (archived);
+
+
+-- ---------------------------------------------------------------------------
+-- conflicts (drift detection)
+-- ---------------------------------------------------------------------------
+-- Drift records produced by brain/drift.check_for_drift after a new workflow
+-- is generated. Each row is a contradiction/update/expansion/deprecation
+-- that Claude detected against an existing non-archived skill. The /conflicts
+-- API + UI panel surface 'unresolved' rows; resolve_conflict('accept') bumps
+-- the existing skill's version and archives the previous record.
+create table if not exists conflicts (
+    id                       uuid           primary key default gen_random_uuid(),
+    existing_skill_id        uuid           references skills(id),
+    new_skill_id             uuid           references skills(id),
+    existing_process_name    text           not null,
+    conflict_type            text           not null check (conflict_type in (
+        'contradiction', 'update', 'expansion', 'deprecation'
+    )),
+    conflict_description     text           not null,
+    existing_rule            text           not null,
+    new_evidence             text           not null,
+    suggested_update         text           not null,
+    severity                 text           not null check (severity in ('high', 'medium', 'low')),
+    status                   text           not null default 'unresolved' check (status in (
+        'unresolved', 'accepted', 'dismissed', 'snoozed'
+    )),
+    snoozed_until            timestamptz,
+    resolved_by              text,
+    resolved_at              timestamptz,
+    created_at               timestamptz    not null default now()
+);
+
+create index if not exists conflicts_status_idx on conflicts (status);
+create index if not exists conflicts_skill_idx  on conflicts (existing_skill_id);
+
+
+-- ---------------------------------------------------------------------------
+-- Public agent API: api_keys, api_requests, executions
+-- ---------------------------------------------------------------------------
+-- api_keys backs the Bearer-token auth for /api/v1/*. We never store the
+-- plaintext key; key_hash is the bcrypt hash, key_prefix is the first 12
+-- chars (also indexed) so verify_api_key() can short-list candidates
+-- without scanning the whole table before bcrypt-comparing.
+create table if not exists api_keys (
+    id            uuid          primary key default gen_random_uuid(),
+    key_hash      text          not null unique,
+    key_prefix    text          not null,
+    name          text          not null,
+    created_at    timestamptz   not null default now(),
+    last_used_at  timestamptz,
+    request_count integer       not null default 0,
+    is_active     boolean       not null default true
+);
+create index if not exists api_keys_prefix_idx on api_keys (key_prefix);
+
+-- api_requests is the per-call audit log. Written from a BackgroundTask
+-- after the response so request handlers don't pay the round-trip cost.
+create table if not exists api_requests (
+    id                uuid       primary key default gen_random_uuid(),
+    api_key_id        uuid       references api_keys(id),
+    endpoint          text       not null,
+    query_text        text,
+    matched_skill_id  uuid,
+    response_time_ms  integer,
+    created_at        timestamptz not null default now()
+);
+create index if not exists api_requests_key_idx     on api_requests (api_key_id);
+create index if not exists api_requests_created_idx on api_requests (created_at);
+
+-- executions: agent feedback when a workflow step runs. exception_note
+-- triggers a drift check (via brain/drift) when Claude judges it as a
+-- genuinely-new edge case not already covered.
+create table if not exists executions (
+    id               uuid       primary key default gen_random_uuid(),
+    skill_id         uuid       references skills(id),
+    step_number      integer,
+    outcome          text       not null check (outcome in (
+        'completed', 'escalated', 'exception_triggered'
+    )),
+    exception_note   text,
+    duration_seconds integer,
+    created_at       timestamptz not null default now()
+);
+create index if not exists executions_skill_idx on executions (skill_id);
+
+
+-- ---------------------------------------------------------------------------
+-- Continuous ingestion: connected_sources + ingest_runs
+-- ---------------------------------------------------------------------------
+-- connected_sources stores per-tenant credentials for live fetches. config
+-- is opaque jsonb (per source_type) — Slack: { bot_token, channel_ids[] };
+-- Notion: { integration_token, page_ids[] }; etc. Tokens are stored in
+-- plaintext server-side (Supabase RLS keeps them out of the browser); the
+-- /sources API redacts the config field for any caller before returning.
+create table if not exists connected_sources (
+    id              uuid          primary key default gen_random_uuid(),
+    source_type     text          not null check (source_type in (
+        'slack', 'notion', 'github', 'gmail', 'intercom'
+    )),
+    display_name    text          not null,
+    config          jsonb         not null,
+    last_synced_at  timestamptz,
+    next_sync_at    timestamptz,
+    is_active       boolean       not null default true,
+    created_at      timestamptz   not null default now()
+);
+create index if not exists connected_sources_active_idx on connected_sources (is_active);
+
+-- ingest_runs is the per-cycle audit log — same shape as the dict the
+-- scheduler builds in run_ingest_cycle(), one row per scheduled or manual
+-- trigger. errors is a jsonb array of "{source}: {message}" strings.
+create table if not exists ingest_runs (
+    id                uuid          primary key default gen_random_uuid(),
+    started_at        timestamptz   not null,
+    duration_seconds  integer,
+    sources_checked   integer       not null default 0,
+    new_chunks        integer       not null default 0,
+    skipped_chunks    integer       not null default 0,
+    new_conflicts     integer       not null default 0,
+    errors            jsonb         not null default '[]'::jsonb,
+    created_at        timestamptz   not null default now()
+);
+create index if not exists ingest_runs_started_idx on ingest_runs (started_at desc);
+
+
+-- ---------------------------------------------------------------------------
+-- Atomic counter bump for api_keys.request_count + last_used_at.
+-- Called from the per-request BackgroundTask in api/auth.py. Doing this
+-- as a single SQL statement avoids the read-modify-write race on counter.
+-- ---------------------------------------------------------------------------
+create or replace function increment_api_key_usage(key_id uuid)
+returns void
+language sql
+as $$
+    update api_keys
+    set request_count = request_count + 1, last_used_at = now()
+    where id = key_id;
+$$;
+
+
+-- ---------------------------------------------------------------------------
+-- Skills summary embedding (powers /api/v1/skills/match)
+-- ---------------------------------------------------------------------------
+-- 1024 dims to match voyage-3 (and the existing chunks.embedding column).
+-- Spec said 1536 but that's OpenAI ada-002 — would crash on insert here.
+alter table skills add column if not exists summary_embedding vector(1024);
+
+create index if not exists skills_summary_embedding_idx
+    on skills using ivfflat (summary_embedding vector_cosine_ops)
+    with (lists = 100);
+
+
+-- ---------------------------------------------------------------------------
+-- match_skills(query_embedding, match_count)
+-- ---------------------------------------------------------------------------
+-- Cosine ANN over skills.summary_embedding. Mirrors match_chunks but on
+-- the skills corpus and only over non-archived rows. Used by the agent
+-- API's /api/v1/skills/match endpoint.
+create or replace function match_skills(
+    query_embedding vector(1024),
+    match_count     int
+)
+returns table (
+    id              uuid,
+    process_name    text,
+    description     text,
+    process_trigger text,
+    steps           jsonb,
+    decision_rules  jsonb,
+    approvals       jsonb,
+    exceptions      jsonb,
+    sources         jsonb,
+    source          text,
+    version         integer,
+    generated_at    timestamptz,
+    similarity      float
+)
+language sql
+stable
+as $$
+    select
+        s.id,
+        s.process_name,
+        s.description,
+        s.process_trigger,
+        s.steps,
+        s.decision_rules,
+        s.approvals,
+        s.exceptions,
+        s.sources,
+        s.source,
+        s.version,
+        s.generated_at,
+        1 - (s.summary_embedding <=> query_embedding) as similarity
+    from skills s
+    where s.archived = false
+      and s.summary_embedding is not null
+    order by s.summary_embedding <=> query_embedding
+    limit match_count;
+$$;
 
 
 -- ---------------------------------------------------------------------------

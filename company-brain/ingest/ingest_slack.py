@@ -1,16 +1,14 @@
-"""Ingest slack_export.json into chunk dicts.
-
-Standalone for now: prints chunks to stdout as JSON, count to stderr.
-"""
+"""Ingest slack_export.json into Chunks."""
 import json
 import sys
 from collections import defaultdict
+from dataclasses import asdict
 from pathlib import Path
 
 from brain.chunker import chunk_text
+from brain.ingestors import BaseIngestor, Chunk
 
 DEMO_PATH = Path(__file__).resolve().parent.parent / "demo-data" / "slack_export.json"
-MAX_TOKENS_PER_CHUNK = 800
 
 
 def load_messages(path: Path) -> list[dict]:
@@ -36,35 +34,35 @@ def format_message(m: dict) -> str:
     return f"#{m['channel']} | {m['user']}: {m['text']}"
 
 
-def build_chunks(messages: list[dict]) -> list[dict]:
-    chunks = []
-    for thread in group_threads(messages):
-        parent = thread[0]
-        is_thread = len(thread) > 1
-        content = "\n".join(format_message(m) for m in thread)
+class SlackIngestor(BaseIngestor):
+    def build_chunks(self, messages: list[dict]) -> list[Chunk]:
+        chunks: list[Chunk] = []
+        for thread in group_threads(messages):
+            parent = thread[0]
+            is_thread = len(thread) > 1
+            content = "\n".join(format_message(m) for m in thread)
 
-        metadata = {
-            "channel": parent["channel"],
-            "author": parent["user"],
-            "timestamp": parent["ts"],
-        }
-        if is_thread:
-            metadata["thread_ts"] = parent["ts"]
+            metadata = {
+                "channel": parent["channel"],
+                "author": parent["user"],
+                "timestamp": parent["ts"],
+            }
+            if is_thread:
+                metadata["thread_ts"] = parent["ts"]
 
-        for piece in chunk_text(content, max_tokens=MAX_TOKENS_PER_CHUNK):
-            chunks.append({
-                "source_type": "slack",
-                "source_name": parent["channel"],
-                "content": piece,
-                "metadata": dict(metadata),
-            })
-    return chunks
+            for piece in chunk_text(content, max_tokens=self.MAX_CHUNK_TOKENS):
+                chunks.append(Chunk(
+                    source_type="slack",
+                    source_name=parent["channel"],
+                    content=piece,
+                    metadata=dict(metadata),
+                ))
+        return chunks
 
 
 def main() -> None:
-    messages = load_messages(DEMO_PATH)
-    chunks = build_chunks(messages)
-    print(json.dumps(chunks, indent=2))
+    chunks = SlackIngestor().process(load_messages(DEMO_PATH))
+    print(json.dumps([asdict(c) for c in chunks], indent=2))
     print(f"Produced {len(chunks)} chunks.", file=sys.stderr)
 
 

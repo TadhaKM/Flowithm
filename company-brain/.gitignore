@@ -21,3 +21,9 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# Graphify outputs
+graphify-out/
+
+# TypeScript build cache
+**/*.tsbuildinfo

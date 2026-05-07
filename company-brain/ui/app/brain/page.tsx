@@ -31,6 +31,24 @@ type Workflow = {
   reviewed_at?: string | null;
 };
 
+type Conflict = {
+  id: string;
+  existing_skill_id: string;
+  new_skill_id: string | null;
+  existing_process_name: string;
+  existing_process_trigger?: string;
+  conflict_type: "contradiction" | "update" | "expansion" | "deprecation";
+  conflict_description: string;
+  existing_rule: string;
+  new_evidence: string;
+  suggested_update: string;
+  severity: "high" | "medium" | "low";
+  status: "unresolved" | "accepted" | "dismissed" | "snoozed";
+  snoozed_until: string | null;
+  created_at: string;
+  targets_archived_version?: boolean;
+};
+
 type SourceFilter = "all" | "slack" | "notion" | "manual" | "github";
 type SortOption = "newest" | "oldest" | "az" | "most_steps";
 type ViewMode = "grid" | "list";
@@ -54,6 +72,10 @@ export default function BrainPage() {
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const [conflicts, setConflicts] = useState<Conflict[]>([]);
+  const [conflictsLoaded, setConflictsLoaded] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
 
   const [search, setSearch] = useState("");
   const debouncedSearch = useDebounced(search, 150);
@@ -85,10 +107,39 @@ export default function BrainPage() {
     };
   }, []);
 
-  // Conflict count: not detected yet. When we wire pg_trgm-based detection
-  // through (e.g. /api/brain/conflicts using find_similar_workflow), set
-  // this from state. For now the banner stays hidden.
-  const conflictCount = 0;
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/conflicts")
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
+      .then((data: Conflict[]) => {
+        if (!cancelled) {
+          setConflicts(Array.isArray(data) ? data : []);
+          setConflictsLoaded(true);
+        }
+      })
+      .catch(() => {
+        // Conflicts are an enhancement — failure to load shouldn't break the page.
+        if (!cancelled) setConflictsLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = window.setTimeout(() => setToast(null), 3500);
+    return () => window.clearTimeout(t);
+  }, [toast]);
+
+  const conflictCount = conflicts.length;
+
+  function removeConflict(id: string) {
+    setConflicts((current) => current.filter((c) => c.id !== id));
+  }
 
   const filtered = useMemo(() => {
     let result = workflows;
@@ -142,6 +193,17 @@ export default function BrainPage() {
 
         {conflictCount > 0 && <ConflictBanner count={conflictCount} />}
 
+        {conflictsLoaded && (
+          <ConflictsSection
+            conflicts={conflicts}
+            onResolved={(id, msg) => {
+              removeConflict(id);
+              setToast(msg);
+            }}
+            hasWorkflows={workflows.length > 0}
+          />
+        )}
+
         {!loading && workflows.length > 0 && (
           <SearchFilterBar
             search={search}
@@ -175,6 +237,8 @@ export default function BrainPage() {
           <WorkflowsList workflows={filtered} onArchived={removeFromList} />
         )}
       </div>
+
+      {toast && <Toast message={toast} />}
     </main>
   );
 }
@@ -196,6 +260,12 @@ function BrainHeader() {
         <span className="text-sm text-zinc-100 font-medium">
           Knowledge base
         </span>
+        <Link
+          href="/brain/api"
+          className="text-sm text-zinc-500 hover:text-zinc-300 transition-colors"
+        >
+          Agent API
+        </Link>
       </div>
       <p className="text-sm text-zinc-500 hidden sm:block">
         Every workflow your team has captured
@@ -350,7 +420,9 @@ function ConflictBanner({ count }: { count: number }) {
       <div className="flex items-center gap-3">
         <WarningIcon />
         <span>
-          <strong className="font-medium">{count} process conflicts detected</strong>{" "}
+          <strong className="font-medium">
+            {count} {count === 1 ? "potential conflict" : "potential conflicts"} detected
+          </strong>{" "}
           — your knowledge base may be out of date
         </span>
       </div>
@@ -365,6 +437,253 @@ function ConflictBanner({ count }: { count: number }) {
       </button>
     </div>
   );
+}
+
+// --------------------------------------------------------------------------
+// Conflicts section + card
+// --------------------------------------------------------------------------
+
+function ConflictsSection({
+  conflicts,
+  onResolved,
+  hasWorkflows,
+}: {
+  conflicts: Conflict[];
+  onResolved: (id: string, toastMessage: string) => void;
+  hasWorkflows: boolean;
+}) {
+  if (conflicts.length === 0) {
+    if (!hasWorkflows) return null;
+    return (
+      <div
+        id="conflicts-section"
+        className="mb-8 flex items-center gap-3 bg-emerald-500/10 border border-emerald-500/30 rounded-xl px-4 py-3 text-sm text-emerald-200"
+      >
+        <CheckCircleIcon />
+        <span>Knowledge base is consistent — no conflicts detected</span>
+      </div>
+    );
+  }
+
+  return (
+    <section id="conflicts-section" className="mb-10">
+      <div className="mb-4 flex items-baseline justify-between">
+        <h3 className="text-lg font-medium tracking-tight text-zinc-100">
+          Conflicts to review
+        </h3>
+        <span className="text-xs text-zinc-500">
+          {conflicts.length} {conflicts.length === 1 ? "conflict" : "conflicts"}
+        </span>
+      </div>
+      <div className="space-y-4">
+        {conflicts.map((c) => (
+          <ConflictCard key={c.id} conflict={c} onResolved={onResolved} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function ConflictCard({
+  conflict,
+  onResolved,
+}: {
+  conflict: Conflict;
+  onResolved: (id: string, toastMessage: string) => void;
+}) {
+  const [pending, setPending] = useState<"accept" | "dismiss" | "snooze" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [collapsing, setCollapsing] = useState(false);
+  const archivedTarget = conflict.targets_archived_version === true;
+
+  async function resolve(action: "accept" | "dismiss" | "snooze") {
+    if (pending) return;
+    setPending(action);
+    setError(null);
+    try {
+      const res = await fetch(`/api/conflicts/${conflict.id}/resolve`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        // resolved_by: when auth lands, populate this from the session.
+        body: JSON.stringify({ action, resolved_by: "Knowledge base UI" }),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      const message =
+        action === "accept"
+          ? `Workflow updated to v${data?.version ?? "?"}`
+          : action === "snooze"
+          ? `Snoozed until ${formatSnoozeDate(data?.snoozed_until)}`
+          : "Conflict dismissed";
+      setCollapsing(true);
+      window.setTimeout(() => onResolved(conflict.id, message), 200);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setPending(null);
+    }
+  }
+
+  return (
+    <article
+      className={`rounded-xl border border-zinc-800 bg-zinc-900/40 p-5 transition-all duration-200 ${
+        collapsing ? "opacity-0 -translate-y-1" : "opacity-100"
+      }`}
+    >
+      <header className="mb-4 flex flex-wrap items-center gap-2">
+        <SeverityBadge severity={conflict.severity} />
+        <ConflictTypeBadge type={conflict.conflict_type} />
+        {archivedTarget && (
+          <span
+            className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-amber-200"
+            title="This conflict targets an older version of the skill."
+          >
+            Targets archived version
+          </span>
+        )}
+        <span className="ml-auto flex items-center gap-3 text-xs text-zinc-500">
+          <span className="font-medium text-zinc-300 truncate max-w-[24rem]">
+            {conflict.existing_process_name}
+          </span>
+          <span>Detected {relativeTime(conflict.created_at)}</span>
+        </span>
+      </header>
+
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 mb-3">
+        <DiffPanel
+          label="Existing rule"
+          body={conflict.existing_rule}
+          tone="red"
+        />
+        <DiffPanel
+          label="New evidence"
+          body={conflict.new_evidence}
+          tone="green"
+        />
+      </div>
+
+      <div className="mb-3 rounded-lg border border-[#1D9E75]/30 bg-[#1D9E75]/10 p-3">
+        <div className="mb-1 text-[11px] font-medium uppercase tracking-wider text-[#1D9E75]">
+          Suggested update
+        </div>
+        <p className="text-sm leading-relaxed text-zinc-200">
+          {conflict.suggested_update || "—"}
+        </p>
+      </div>
+
+      <p className="mb-4 text-xs text-zinc-500 leading-relaxed">
+        {conflict.conflict_description}
+      </p>
+
+      {error && (
+        <div className="mb-3 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+          {error}
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          onClick={() => resolve("accept")}
+          disabled={!!pending || archivedTarget}
+          title={
+            archivedTarget
+              ? "This conflict targets an older version. Dismiss it and re-run drift detection against the current version if still relevant."
+              : undefined
+          }
+          className={`px-3.5 py-1.5 text-xs font-medium rounded-md transition-colors ${
+            archivedTarget
+              ? "bg-zinc-800 text-zinc-500 cursor-not-allowed"
+              : "bg-[#1D9E75] text-white hover:bg-[#178c66] disabled:opacity-50"
+          }`}
+        >
+          {pending === "accept" ? "Applying…" : "Accept update"}
+        </button>
+        <button
+          onClick={() => resolve("dismiss")}
+          disabled={!!pending}
+          className="px-3.5 py-1.5 text-xs font-medium rounded-md text-zinc-300 hover:bg-zinc-800 disabled:opacity-50 transition-colors"
+        >
+          {pending === "dismiss" ? "Dismissing…" : "Dismiss"}
+        </button>
+        <button
+          onClick={() => resolve("snooze")}
+          disabled={!!pending || archivedTarget}
+          className="px-3.5 py-1.5 text-xs font-medium rounded-md text-zinc-300 hover:bg-zinc-800 disabled:opacity-50 transition-colors"
+        >
+          {pending === "snooze" ? "Snoozing…" : "Snooze 7 days"}
+        </button>
+      </div>
+    </article>
+  );
+}
+
+function DiffPanel({
+  label,
+  body,
+  tone,
+}: {
+  label: string;
+  body: string;
+  tone: "red" | "green";
+}) {
+  const tones =
+    tone === "red"
+      ? "border-red-500/20 bg-red-500/[0.06] text-red-200"
+      : "border-emerald-500/20 bg-emerald-500/[0.06] text-emerald-200";
+  return (
+    <div className={`rounded-lg border p-3 ${tones}`}>
+      <div className="mb-1 text-[11px] font-medium uppercase tracking-wider opacity-80">
+        {label}
+      </div>
+      <p className="text-sm leading-relaxed text-zinc-200 whitespace-pre-wrap">
+        {body || "—"}
+      </p>
+    </div>
+  );
+}
+
+function SeverityBadge({ severity }: { severity: Conflict["severity"] }) {
+  const styles =
+    severity === "high"
+      ? "bg-red-500/15 border-red-500/40 text-red-200"
+      : severity === "medium"
+      ? "bg-amber-500/15 border-amber-500/40 text-amber-200"
+      : "bg-zinc-700/40 border-zinc-600 text-zinc-300";
+  return (
+    <span
+      className={`inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-medium uppercase tracking-wider ${styles}`}
+    >
+      {severity}
+    </span>
+  );
+}
+
+function ConflictTypeBadge({ type }: { type: Conflict["conflict_type"] }) {
+  return (
+    <span className="inline-flex items-center rounded-md border border-zinc-700 bg-zinc-800/60 px-2 py-0.5 text-xs font-medium text-zinc-300">
+      {type}
+    </span>
+  );
+}
+
+function Toast({ message }: { message: string }) {
+  return (
+    <div className="fixed bottom-6 right-6 z-50 animate-in fade-in slide-in-from-bottom-2 rounded-lg border border-zinc-700 bg-zinc-900/95 px-4 py-2.5 text-sm text-zinc-100 shadow-lg backdrop-blur">
+      {message}
+    </div>
+  );
+}
+
+function formatSnoozeDate(iso?: string | null): string {
+  if (!iso) return "later";
+  try {
+    const d = new Date(iso);
+    return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  } catch {
+    return "later";
+  }
 }
 
 // --------------------------------------------------------------------------
