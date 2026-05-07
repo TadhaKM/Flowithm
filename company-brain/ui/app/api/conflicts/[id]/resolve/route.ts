@@ -1,6 +1,8 @@
 // Proxy POST /api/conflicts/{id}/resolve -> FastAPI /conflicts/{id}/resolve.
 import { NextResponse } from "next/server";
 
+import { orgHeaders } from "@/lib/org";
+
 const API_URL = (process.env.FLOWITHM_API_URL || "http://localhost:8000").replace(/\/$/, "");
 
 export async function POST(
@@ -10,9 +12,10 @@ export async function POST(
   const { id } = await params;
   const payload = await request.json().catch(() => ({}));
   try {
+    const headers = await orgHeaders({ json: true });
     const res = await fetch(`${API_URL}/conflicts/${encodeURIComponent(id)}/resolve`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers,
       body: JSON.stringify(payload),
       cache: "no-store",
     });

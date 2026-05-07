@@ -1,16 +1,11 @@
 // Server-only proxy for /api/v1/keys (list + create). Injects ADMIN_TOKEN
-// from process.env so the plaintext never reaches the browser bundle.
+// AND X-Org-ID so the agent API scopes the key list / new key to the
+// dashboard's tenant.
 import { NextResponse } from "next/server";
 
-const API_URL = (process.env.FLOWITHM_API_URL || "http://localhost:8000").replace(/\/$/, "");
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
+import { adminTokenMissing, getOrgId, orgHeaders } from "@/lib/org";
 
-function adminHeaders(): Record<string, string> {
-  return {
-    Authorization: `Bearer ${ADMIN_TOKEN}`,
-    "content-type": "application/json",
-  };
-}
+const API_URL = (process.env.FLOWITHM_API_URL || "http://localhost:8000").replace(/\/$/, "");
 
 function notConfigured() {
   return NextResponse.json(
@@ -24,12 +19,10 @@ function notConfigured() {
 }
 
 export async function GET() {
-  if (!ADMIN_TOKEN) return notConfigured();
+  if (adminTokenMissing()) return notConfigured();
   try {
-    const res = await fetch(`${API_URL}/api/v1/keys`, {
-      headers: adminHeaders(),
-      cache: "no-store",
-    });
+    const headers = await orgHeaders({ admin: true });
+    const res = await fetch(`${API_URL}/api/v1/keys`, { headers, cache: "no-store" });
     const body = await res.text();
     return new NextResponse(body, {
       status: res.status,
@@ -44,12 +37,18 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  if (!ADMIN_TOKEN) return notConfigured();
+  if (adminTokenMissing()) return notConfigured();
   const payload = await request.json().catch(() => ({}));
+  // Inject org_id into the body so the new key gets bound to the dashboard
+  // tenant. Caller can override by including org_id in their own payload
+  // (admin users picking which tenant to mint for).
+  const orgId = await getOrgId();
+  if (orgId && !payload.org_id) payload.org_id = orgId;
   try {
+    const headers = await orgHeaders({ admin: true, json: true });
     const res = await fetch(`${API_URL}/api/v1/keys`, {
       method: "POST",
-      headers: adminHeaders(),
+      headers,
       body: JSON.stringify(payload),
       cache: "no-store",
     });

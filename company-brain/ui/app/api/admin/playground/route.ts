@@ -2,6 +2,12 @@
 // server-side $FLOWITHM_PLAYGROUND_KEY so the dashboard never embeds a real
 // customer key in the browser. Mint the playground key once via the New key
 // flow with name="Playground" and paste the plaintext into .env.local.
+//
+// Multi-tenancy note: the playground key carries its OWN org_id (set when
+// the key was minted), so /skills/match returns matches from THAT tenant —
+// not necessarily the dashboard's current tenant. Acceptable for the
+// self-hosted single-org default; a multi-tenant SaaS deployment would
+// need a per-org playground key (or skip the playground entirely).
 import { NextResponse } from "next/server";
 
 const API_URL = (process.env.FLOWITHM_API_URL || "http://localhost:8000").replace(/\/$/, "");

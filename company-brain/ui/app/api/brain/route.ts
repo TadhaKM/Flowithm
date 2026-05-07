@@ -4,6 +4,7 @@
 // linkability — /brain?source=slack works with refresh).
 import { NextResponse } from "next/server";
 
+import { getOrgId } from "@/lib/org";
 import { getSupabase } from "@/lib/supabase";
 
 const SOURCE_FILTERS = new Set(["slack", "notion", "manual", "github"]);
@@ -21,21 +22,25 @@ type SkillRow = {
   source_metadata: Record<string, unknown> | null;
   generated_at: string | null;
   reviewed_at: string | null;
+  needs_review: boolean | null;
+  needs_review_reason: string | null;
 };
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const source = url.searchParams.get("source") || "all";
 
+  const orgId = await getOrgId();
   let query;
   try {
     query = getSupabase()
       .from("skills")
       .select(
-        "id, process_name, process_trigger, steps, decision_rules, approvals, exceptions, sources, source, source_metadata, generated_at, reviewed_at",
+        "id, process_name, process_trigger, steps, decision_rules, approvals, exceptions, sources, source, source_metadata, generated_at, reviewed_at, needs_review, needs_review_reason",
       )
       .eq("archived", false)
       .order("generated_at", { ascending: false });
+    if (orgId) query = query.eq("org_id", orgId);
   } catch (e) {
     return NextResponse.json(
       { error: e instanceof Error ? e.message : "supabase init failed" },
@@ -65,6 +70,8 @@ export async function GET(request: Request) {
     source_metadata: r.source_metadata || {},
     generated_at: r.generated_at,
     reviewed_at: r.reviewed_at,
+    needs_review: r.needs_review === true,
+    needs_review_reason: r.needs_review_reason,
   }));
 
   return NextResponse.json({ workflows });

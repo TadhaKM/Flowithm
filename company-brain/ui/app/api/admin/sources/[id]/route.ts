@@ -1,11 +1,12 @@
 // Server-only proxy for PATCH + DELETE on a single source. Both admin-only.
 import { NextResponse } from "next/server";
 
+import { adminTokenMissing, orgHeaders } from "@/lib/org";
+
 const API_URL = (process.env.FLOWITHM_API_URL || "http://localhost:8000").replace(/\/$/, "");
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
 
 function adminGuard() {
-  if (!ADMIN_TOKEN) {
+  if (adminTokenMissing()) {
     return NextResponse.json(
       { error: "ADMIN_TOKEN not set", code: "INTERNAL_ERROR" },
       { status: 500 },
@@ -23,12 +24,10 @@ export async function PATCH(
   const { id } = await params;
   const payload = await request.json().catch(() => ({}));
   try {
+    const headers = await orgHeaders({ admin: true, json: true });
     const res = await fetch(`${API_URL}/sources/${encodeURIComponent(id)}`, {
       method: "PATCH",
-      headers: {
-        Authorization: `Bearer ${ADMIN_TOKEN}`,
-        "content-type": "application/json",
-      },
+      headers,
       body: JSON.stringify(payload),
       cache: "no-store",
     });
@@ -53,9 +52,10 @@ export async function DELETE(
   if (guard) return guard;
   const { id } = await params;
   try {
+    const headers = await orgHeaders({ admin: true });
     const res = await fetch(`${API_URL}/sources/${encodeURIComponent(id)}`, {
       method: "DELETE",
-      headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
+      headers,
       cache: "no-store",
     });
     const body = await res.text();

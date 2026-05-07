@@ -47,7 +47,10 @@ export async function GET(request: Request) {
   const supa = getSupabase();
   const since30 = new Date(Date.now() - DAYS_RANGE_STATS * 86_400_000).toISOString();
 
-  // Pull only what we need; api_requests can grow large fast.
+  // TODO multi-tenancy: api_requests doesn't carry org_id directly (it
+  // references api_keys which does). For multi-tenant deploys, filter via
+  // `api_key_id IN (SELECT id FROM api_keys WHERE org_id = X)`. Single-org
+  // deploys see all their own usage either way.
   const { data, error } = await supa
     .from("api_requests")
     .select("endpoint,query_text,matched_skill_id,response_time_ms,created_at")

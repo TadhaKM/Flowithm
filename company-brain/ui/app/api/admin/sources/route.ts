@@ -1,14 +1,16 @@
-// Server-only proxy for /sources (list + create). GET is public on the
-// FastAPI side (config is already redacted there), so we don't need
-// ADMIN_TOKEN for read. POST is admin-gated → inject the token.
+// Server-only proxy for /sources (list + create). Both pass X-Org-ID so
+// the server's get_org_id resolver picks up the dashboard's tenant.
+// POST also injects ADMIN_TOKEN.
 import { NextResponse } from "next/server";
 
+import { adminTokenMissing, orgHeaders } from "@/lib/org";
+
 const API_URL = (process.env.FLOWITHM_API_URL || "http://localhost:8000").replace(/\/$/, "");
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
 
 export async function GET() {
   try {
-    const res = await fetch(`${API_URL}/sources`, { cache: "no-store" });
+    const headers = await orgHeaders();
+    const res = await fetch(`${API_URL}/sources`, { headers, cache: "no-store" });
     const body = await res.text();
     return new NextResponse(body, {
       status: res.status,
@@ -23,7 +25,7 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  if (!ADMIN_TOKEN) {
+  if (adminTokenMissing()) {
     return NextResponse.json(
       { error: "ADMIN_TOKEN not set", code: "INTERNAL_ERROR" },
       { status: 500 },
@@ -31,12 +33,10 @@ export async function POST(request: Request) {
   }
   const payload = await request.json().catch(() => ({}));
   try {
+    const headers = await orgHeaders({ admin: true, json: true });
     const res = await fetch(`${API_URL}/sources`, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${ADMIN_TOKEN}`,
-        "content-type": "application/json",
-      },
+      headers,
       body: JSON.stringify(payload),
       cache: "no-store",
     });

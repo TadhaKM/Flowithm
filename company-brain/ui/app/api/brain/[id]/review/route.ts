@@ -2,6 +2,8 @@
 // No body required; clears the staleness flag and bumps reviewed_at.
 import { NextResponse } from "next/server";
 
+import { orgHeaders } from "@/lib/org";
+
 const API_URL = (process.env.FLOWITHM_API_URL || "http://localhost:8000").replace(/\/$/, "");
 
 export async function POST(
@@ -10,8 +12,10 @@ export async function POST(
 ) {
   const { id } = await params;
   try {
+    const headers = await orgHeaders();
     const res = await fetch(`${API_URL}/skills/${encodeURIComponent(id)}/review`, {
       method: "POST",
+      headers,
       cache: "no-store",
     });
     const body = await res.text();

@@ -131,25 +131,31 @@ Brand colour `#1D9E75` (teal); dark theme using zinc neutrals.
 | `/brain/api` | Agent API tab. Keys management (table + two-click revoke + new-key modal showing plaintext once with copy button). 30-day usage stats (cards + 14-day local-time SVG bar chart). Three integration snippets (TS / Python / Claude tool use) with the `needs_review` escalation pattern in each. Live `/skills/match` playground via server-side playground key with syntax-highlighted JSON response. |
 | `/brain/sources` | Connected-sources dashboard. Last-run banner with new-chunks / skipped / conflicts / staleness counts and inline-expandable error logs. Per-source cards (type icon, name, active/paused toggle, last_synced, two-click Remove). + Connect source modal with per-type fields (Slack / Notion / **Gmail** / **Intercom** / GitHub). |
 | `/workflow/[id]` | Slack-bot deeplink target. Read-only two-panel render with Copy JSON. |
+| `/setup` | First-run organisation bootstrap. Renders when no `flowithm_org_id` cookie is present (middleware redirects). Submits `{company_name, user_name?}` to `/api/setup`, which creates the org and sets the httpOnly cookie. Single-tenant deploys can skip the gate by setting `FLOWITHM_DEFAULT_ORG_ID` in the dashboard env. |
 
 ### Server-only proxy routes (`ui/app/api/`)
 
 The dashboard never embeds the Supabase service key, FastAPI
-`ADMIN_TOKEN`, or playground key in the browser bundle. Instead, every
-admin call goes through a Next.js route that injects the secret
-server-side:
+`ADMIN_TOKEN`, or playground key in the browser bundle. Every admin call
+goes through a Next.js route that injects the secret AND the
+`flowithm_org_id` cookie value as `X-Org-ID` (via `lib/org.orgHeaders`).
 
-- `/api/brain` — list workflows (Supabase direct)
-- `/api/brain/[id]` — GET / PATCH single workflow
+- `/api/setup` — POST → FastAPI `/setup`, sets the org cookie
+- `/api/brain` — list workflows (Supabase direct, scoped to org_id)
+- `/api/brain/[id]` — GET / PATCH single workflow (scoped to org_id)
 - `/api/brain/[id]/review` — POST → FastAPI `/skills/{id}/review`
 - `/api/conflicts` — GET → FastAPI `/conflicts`
 - `/api/conflicts/[id]/resolve` — POST → FastAPI `/conflicts/{id}/resolve`
-- `/api/admin/keys` — GET/POST → FastAPI `/api/v1/keys` (with `ADMIN_TOKEN`)
+- `/api/admin/keys` — GET/POST → FastAPI `/api/v1/keys` (with `ADMIN_TOKEN`); POST injects `org_id` from cookie into the body
 - `/api/admin/keys/[id]` — DELETE → FastAPI `/api/v1/keys/{id}`
 - `/api/admin/usage` — Supabase aggregations for the dashboard
-- `/api/admin/playground` — GET → FastAPI `/api/v1/skills/match` (with `FLOWITHM_PLAYGROUND_KEY`)
+- `/api/admin/playground` — GET → FastAPI `/api/v1/skills/match` (with `FLOWITHM_PLAYGROUND_KEY`); the playground key carries its own org_id
 - `/api/admin/sources` + `[id]` — CRUD proxies for `/sources`
 - `/api/admin/ingest` — GET status + POST trigger
+
+`ui/middleware.ts` redirects every non-API page to `/setup` when no
+`flowithm_org_id` cookie is present (and `FLOWITHM_DEFAULT_ORG_ID` env
+isn't set as a single-tenant escape hatch).
 
 ---
 
@@ -344,7 +350,8 @@ authoritative; full message bodies via `git show <hash>`.
 | `66b31e9` | Note Gmail label-quoting follow-up as a TODO |
 | `3e6d8e0` | Add PROJECT.md — comprehensive project reference |
 | `813fe4b` | Multi-tenancy schema: `organisations` table + `org_id` columns + backfill + RLS enable + RPC `target_org_id` filter (commit 1 of 3) |
-| _(next)_ | Multi-tenancy backend wiring: every store helper takes `org_id`, scheduler runs per-org, auth extracts org from API key, `POST /setup` endpoint, `X-Org-ID` header on Slack bot calls (commit 2 of 3) |
+| `8c60168` | Multi-tenancy backend wiring: every store helper takes `org_id`, scheduler runs per-org, auth extracts org from API key, `POST /setup` endpoint, `X-Org-ID` header on Slack bot calls (commit 2 of 3) |
+| _(next)_ | Multi-tenancy dashboard: `/setup` page, `flowithm_org_id` httpOnly cookie, Next.js middleware redirect, `lib/org.ts` helper, every proxy route forwards `X-Org-ID` (commit 3 of 3) |
 
 ---
 

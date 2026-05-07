@@ -2,6 +2,8 @@
 // host stays out of the client bundle; matches the Slack bot's env var name.
 import { NextResponse } from "next/server";
 
+import { orgHeaders } from "@/lib/org";
+
 const API_URL = (process.env.FLOWITHM_API_URL || "http://localhost:8000").replace(/\/$/, "");
 
 export async function GET(request: Request) {
@@ -9,7 +11,8 @@ export async function GET(request: Request) {
   const includeSnoozed = searchParams.get("include_snoozed") === "true";
   const url = `${API_URL}/conflicts?include_snoozed=${includeSnoozed ? "true" : "false"}`;
   try {
-    const res = await fetch(url, { cache: "no-store" });
+    const headers = await orgHeaders();
+    const res = await fetch(url, { headers, cache: "no-store" });
     const body = await res.text();
     return new NextResponse(body, {
       status: res.status,

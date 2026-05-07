@@ -2,6 +2,7 @@
 // PATCH  /api/brain/[id] — update one of: process_name, reviewed_at, archived.
 import { NextResponse } from "next/server";
 
+import { getOrgId } from "@/lib/org";
 import { getSupabase } from "@/lib/supabase";
 
 type RouteContext = { params: Promise<{ id: string }> };
@@ -48,11 +49,13 @@ function rowToWorkflow(r: SkillRow) {
 
 export async function GET(_request: Request, ctx: RouteContext) {
   const { id } = await ctx.params;
-  const { data, error } = await getSupabase()
+  const orgId = await getOrgId();
+  let q = getSupabase()
     .from("skills")
     .select("*")
-    .eq("id", id)
-    .single();
+    .eq("id", id);
+  if (orgId) q = q.eq("org_id", orgId);
+  const { data, error } = await q.single();
   if (error || !data) {
     return NextResponse.json(
       { error: error?.message || "workflow not found" },
@@ -92,12 +95,13 @@ export async function PATCH(request: Request, ctx: RouteContext) {
     );
   }
 
-  const { data, error } = await getSupabase()
+  const orgId = await getOrgId();
+  let q2 = getSupabase()
     .from("skills")
     .update(update)
-    .eq("id", id)
-    .select()
-    .single();
+    .eq("id", id);
+  if (orgId) q2 = q2.eq("org_id", orgId);
+  const { data, error } = await q2.select().single();
   if (error || !data) {
     return NextResponse.json(
       { error: error?.message || "update failed" },
