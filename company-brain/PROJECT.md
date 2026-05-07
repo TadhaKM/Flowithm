@@ -424,7 +424,7 @@ authoritative; full message bodies via `git show <hash>`.
 | `3835def` | Real `/health` probe (Supabase + Anthropic + Voyage + scheduler + circuit-breaker checks) + `APP_VERSION` env (commit 3 of 3) |
 | `8e0af1c` | Production deployment: Dockerfile + railway.json + ui/vercel.json + .dockerignore + DEPLOYMENT.md + CORS lockdown via `FRONTEND_URL` |
 | `a0ad296` | First-run onboarding flow: `/onboarding/connect` source picker + `/onboarding/generate` first-workflow page (with CSS confetti) + onboarding banner on `/brain` + step indicator + middleware whitelist for `/onboarding/*` |
-| _(next)_ | Test suite expansion (118 → 173): `test_text_utils`, `test_staleness`, `test_auth`, `test_drift`, `test_agent_api`, `test_anthropic_client` + `mock_supabase` / `mock_voyage` / `mock_anthropic` fixtures + `pytest-cov` / `freezegun` / `responses` / `pytest-mock` / `pytest-asyncio` deps + `Makefile` + `slow` marker. Caught + fixed two `extra={"process": …}` LogRecord-collision bugs in `staleness.py` and `drift.py`; added `SafeLogger` to prevent recurrence. |
+| `ced5860` | Test suite expansion (118 → 173): `test_text_utils`, `test_staleness`, `test_auth`, `test_drift`, `test_agent_api`, `test_anthropic_client` + `mock_supabase` / `mock_voyage` / `mock_anthropic` fixtures + `pytest-cov` / `freezegun` / `responses` / `pytest-mock` / `pytest-asyncio` deps + `Makefile` + `slow` marker. Caught + fixed two `extra={"process": …}` LogRecord-collision bugs in `staleness.py` and `drift.py`; added `SafeLogger` to prevent recurrence. |
 
 ---
 
