@@ -2,7 +2,9 @@
 
 Used as a FastAPI dependency on every /api/v1/* route. Side-effects
 (usage counter bump, audit row write) run in BackgroundTasks so they
-never block the response. Slow requests (>1s) print a warning to stdout.
+never block the response. Slow requests (>1s) emit a structured log line
+with the query length, never the verbatim text — full audit lives in
+the api_requests table.
 """
 from __future__ import annotations
 
@@ -15,11 +17,14 @@ from typing import Any
 import bcrypt
 from fastapi import BackgroundTasks, Depends, HTTPException, Request
 
+from brain.logger import get_logger
 from brain.store import (
     find_api_keys_by_prefix,
     increment_api_key_usage,
     insert_api_request,
 )
+
+log = get_logger("flowithm.auth")
 
 DOCS_URL = "https://flowithm.io/docs"
 KEY_PREFIX_LEN = 12
@@ -85,13 +90,16 @@ def _log_request(
             matched_skill_id=matched_skill_id,
         )
         if response_time_ms > SLOW_REQUEST_THRESHOLD_MS:
-            print(
-                f"[agent-api] slow request: {endpoint} took {response_time_ms}ms"
-                + (f" (q={query_text!r})" if query_text else ""),
-                flush=True,
-            )
+            # Never log the verbatim query — it's customer prompt material
+            # that often contains PII. The full text is already persisted
+            # in api_requests for analytics; stdout gets length only.
+            log.warning("slow request", extra={
+                "endpoint": endpoint,
+                "duration_ms": response_time_ms,
+                "query_len": len(query_text or ""),
+            })
     except Exception as exc:
-        print(f"[agent-api] _log_request failed: {exc}", flush=True)
+        log.error("_log_request failed", exc_info=True, extra={"error": str(exc)})
 
 
 def _extract_bearer(authorization: str | None) -> str:
@@ -198,13 +206,12 @@ def verify_admin_token(request: Request) -> None:
 
 
 def _constant_time_eq(a: str, b: str) -> bool:
-    """Constant-time comparison so an attacker can't time-guess characters."""
-    if len(a) != len(b):
-        return False
-    diff = 0
-    for x, y in zip(a, b):
-        diff |= ord(x) ^ ord(y)
-    return diff == 0
+    """Constant-time comparison so an attacker can't time-guess characters.
+    Delegates to hmac.compare_digest — stdlib does the safe thing rather
+    than us hand-rolling and getting it subtly wrong on the next refactor.
+    """
+    import hmac
+    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
 
 
 AdminTokenDep = Depends(verify_admin_token)

@@ -6,3 +6,10 @@ graphify-out/
 
 # TypeScript build cache
 **/*.tsbuildinfo
+
+# Google OAuth artefacts — these grant Gmail read access. Never commit.
+# Belt-and-braces with company-brain/.gitignore since the path is
+# configurable via GOOGLE_CLIENT_SECRET_PATH / GMAIL_TOKEN_OUTPUT.
+gmail_token.json
+client_secret.json
+*.token.json

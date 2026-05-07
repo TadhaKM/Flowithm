@@ -27,3 +27,10 @@ graphify-out/
 
 # TypeScript build cache
 **/*.tsbuildinfo
+
+# Google OAuth artefacts (created by `python -m ingest.gmail_auth`).
+# These contain refresh tokens that grant Gmail read access — must NEVER
+# be committed even by accident.
+gmail_token.json
+client_secret.json
+*.token.json

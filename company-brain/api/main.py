@@ -463,13 +463,15 @@ def setup(req: SetupRequest) -> dict:
     name = (req.company_name or "").strip()
     if not name:
         raise HTTPException(400, "company_name is required")
-    # Slugify: lowercase, alphanumeric + hyphens, deduplicate against existing.
+    # Slugify: lowercase, alphanumeric + hyphens, deduplicate against
+    # existing. On collision, suffix with a random hex token rather than
+    # a monotonic counter so existence checks don't leak ordinal info
+    # ("acme-2" → an attacker learns "acme" exists).
+    import secrets as _secrets
     base_slug = "".join(ch if ch.isalnum() else "-" for ch in name.lower()).strip("-") or "org"
     slug = base_slug
-    suffix = 2
     while get_organisation_by_slug(slug) is not None:
-        slug = f"{base_slug}-{suffix}"
-        suffix += 1
+        slug = f"{base_slug}-{_secrets.token_hex(3)}"
     org = create_organisation(name=name, slug=slug)
     return {
         "id": str(org.get("id") or ""),

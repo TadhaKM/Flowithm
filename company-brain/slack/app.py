@@ -40,8 +40,23 @@ def _require(name: str) -> str:
 
 def main() -> None:
     bot_token = _require("SLACK_BOT_TOKEN")
-    signing_secret = os.environ.get("SLACK_SIGNING_SECRET")  # not required for Socket Mode
-    app_token = _require("SLACK_APP_TOKEN")
+    # SLACK_APP_TOKEN identifies a Socket-Mode deploy; signing_secret is
+    # only optional in that mode. Anyone running HTTP-mode without
+    # SLACK_SIGNING_SECRET would accept unsigned event POSTs from the
+    # public internet — fail loudly here so that misconfig can't ship.
+    app_token = os.environ.get("SLACK_APP_TOKEN")
+    signing_secret = os.environ.get("SLACK_SIGNING_SECRET")
+    if not app_token and not signing_secret:
+        sys.exit(
+            "Slack bot startup refused: set SLACK_APP_TOKEN for Socket Mode "
+            "OR SLACK_SIGNING_SECRET for HTTP mode. Without one of these the "
+            "bot would accept unsigned events."
+        )
+    if not app_token:
+        sys.exit(
+            "SLACK_APP_TOKEN missing — Socket Mode required for this entry "
+            "point. See slack/README.md for HTTP-mode setup (separate file)."
+        )
 
     app = App(token=bot_token, signing_secret=signing_secret)
     handlers.register(app)

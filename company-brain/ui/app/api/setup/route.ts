@@ -27,11 +27,15 @@ export async function POST(request: Request) {
     const out = NextResponse.json(parsed, { status: 200 });
     if (orgId) {
       // httpOnly so the browser can't read or modify it from JS.
+      // secure so it never ships over plaintext HTTP (a staging deploy
+      // without TLS would leak the cookie otherwise).
+      // sameSite=lax prevents cross-site POSTs from re-using it.
       // The proxy routes read it server-side and forward to FastAPI.
       out.cookies.set({
         name: "flowithm_org_id",
         value: orgId,
         httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
         sameSite: "lax",
         path: "/",
         maxAge: ONE_YEAR_SECONDS,

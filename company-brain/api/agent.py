@@ -137,12 +137,13 @@ def create_api_key(req: CreateKeyRequest, _admin=AdminTokenDep) -> dict[str, Any
     hashed = bcrypt.hashpw(plaintext.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
     row = insert_api_key(req.name, prefix, hashed, org_id=req.org_id or None)
-    print(
-        f"[agent-api] new API key issued: {prefix}... "
-        f"(name={req.name!r}, id={row.get('id')}). "
-        "Plaintext shown to caller; cannot be retrieved.",
-        flush=True,
-    )
+    # Audit log without leaking the prefix — anything an attacker could
+    # use to narrow down a brute-force search lives only in the DB.
+    from brain.logger import get_logger
+    get_logger("flowithm.agent_api").info("api key issued", extra={
+        "id": row.get("id"),
+        "name": req.name,
+    })
     return {
         "id": str(row.get("id") or ""),
         "prefix": prefix,
