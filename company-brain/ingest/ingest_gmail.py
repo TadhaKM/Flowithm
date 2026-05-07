@@ -92,6 +92,8 @@ class GmailIngestor(BaseIngestor):
 
         # Gmail's `q` operator accepts label:NAME (handles user labels) and
         # after:UNIX_TIMESTAMP for incremental sync.
+        # TODO: add _quote_label() helper if label names contain spaces —
+        # Gmail requires quoting (label:"my label") in the q= param.
         q = f"label:{label}"
         if self.since:
             q += f" after:{int(self.since.timestamp())}"
