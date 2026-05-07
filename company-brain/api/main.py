@@ -45,9 +45,15 @@ from brain.store import (
     archive_workflow,
     clear_workflows,
     count_chunks,
+    deactivate_connected_source,
     find_similar_workflow,
+    get_connected_source,
+    get_latest_ingest_run,
     get_workflow,
+    insert_connected_source,
+    list_connected_sources,
     list_workflows,
+    update_connected_source,
 )
 
 load_dotenv()
@@ -115,8 +121,23 @@ class SkillFileResponse(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     count = _cached_chunk_count()
-    print(f"[Company Brain] startup — {count} chunks indexed", flush=True)
-    yield
+    print(f"[Flowithm API] startup — {count} chunks indexed", flush=True)
+    # Best-effort scheduler boot. If APScheduler / Supabase aren't available
+    # we still serve traffic — the manual /ingest/trigger path will report
+    # the error too if the user tries to use it.
+    try:
+        from brain.scheduler import scheduler
+        scheduler.start()
+    except Exception as exc:
+        print(f"[Flowithm API] scheduler failed to start: {exc}", flush=True)
+    try:
+        yield
+    finally:
+        try:
+            from brain.scheduler import scheduler
+            scheduler.stop()
+        except Exception:
+            pass
 
 
 app = FastAPI(title="Company Brain API", lifespan=lifespan)
@@ -245,3 +266,108 @@ def resolve_conflict_endpoint(conflict_id: str, req: ConflictResolveRequest) -> 
 def skill_conflicts(skill_id: str) -> list[dict]:
     """Full conflict history for a single skill — any status."""
     return get_conflict_history(skill_id)
+
+
+# ---------------------------------------------------------------------------
+# Continuous ingestion: status, manual trigger, source CRUD (admin-only)
+# ---------------------------------------------------------------------------
+import os as _os  # noqa: E402
+
+from api.auth import verify_admin_token  # noqa: E402
+from fastapi import Depends as _Depends  # noqa: E402
+
+_AdminDep = _Depends(verify_admin_token)
+
+
+class SourceCreate(BaseModel):
+    source_type: str
+    display_name: str
+    config: dict
+
+
+class SourceUpdate(BaseModel):
+    display_name: str | None = None
+    config: dict | None = None
+    is_active: bool | None = None
+
+
+_REQUIRED_CONFIG_KEYS = {
+    "slack":  {"bot_token", "channel_ids"},
+    "notion": {"integration_token", "page_ids"},
+}
+
+
+def _validate_source_config(source_type: str, config: dict) -> None:
+    required = _REQUIRED_CONFIG_KEYS.get(source_type)
+    if required is None:
+        return  # github / gmail / intercom — accept any shape for now
+    missing = [k for k in required if k not in config or config[k] in (None, "", [])]
+    if missing:
+        raise HTTPException(400, f"missing required config keys for {source_type}: {missing}")
+
+
+@app.get("/ingest/status")
+def ingest_status() -> dict:
+    """Last run summary + next scheduled run + cadence."""
+    from brain.scheduler import scheduler
+
+    last_db = get_latest_ingest_run()
+    last = scheduler.last_run_summary or last_db
+    return {
+        "last_run": last,
+        "next_run_at": scheduler.next_run_at_iso(),
+        "schedule_hours": scheduler.schedule_hours(),
+    }
+
+
+@app.post("/ingest/trigger")
+def ingest_trigger(_admin=_AdminDep) -> dict:
+    """Kick off run_ingest_cycle in a daemon thread; admin-only."""
+    from brain.scheduler import scheduler
+
+    scheduler.trigger_now()
+    return {"triggered": True, "message": "Ingest started in background"}
+
+
+@app.get("/sources")
+def sources_list() -> list[dict]:
+    """Every connected source. Tokens redacted in the config field."""
+    return list_connected_sources(redact=True)
+
+
+@app.post("/sources")
+def sources_create(req: SourceCreate, _admin=_AdminDep) -> dict:
+    if req.source_type not in {"slack", "notion", "github", "gmail", "intercom"}:
+        raise HTTPException(400, f"unsupported source_type: {req.source_type}")
+    _validate_source_config(req.source_type, req.config)
+    return insert_connected_source(req.source_type, req.display_name, req.config)
+
+
+@app.patch("/sources/{source_id}")
+def sources_update(source_id: str, req: SourceUpdate, _admin=_AdminDep) -> dict:
+    existing = get_connected_source(source_id)
+    if not existing:
+        raise HTTPException(404, f"source not found: {source_id}")
+    patch: dict = {}
+    if req.display_name is not None:
+        patch["display_name"] = req.display_name
+    if req.config is not None:
+        _validate_source_config(existing["source_type"], req.config)
+        patch["config"] = req.config
+    if req.is_active is not None:
+        patch["is_active"] = req.is_active
+    if not patch:
+        raise HTTPException(400, "no fields to update")
+    updated = update_connected_source(source_id, patch)
+    if updated is None:
+        raise HTTPException(404, f"source not found: {source_id}")
+    return updated
+
+
+@app.delete("/sources/{source_id}")
+def sources_delete(source_id: str, _admin=_AdminDep) -> dict:
+    """Soft-delete (is_active=false). Stops the scheduler picking it up."""
+    ok = deactivate_connected_source(source_id)
+    if not ok:
+        raise HTTPException(404, f"source not found: {source_id}")
+    return {"status": "ok", "deactivated": source_id}
