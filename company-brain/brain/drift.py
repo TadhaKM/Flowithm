@@ -296,9 +296,11 @@ def check_for_drift(
             return []
         insert = client.table(CONFLICTS_TABLE).insert(rows).execute()
         inserted = insert.data or []
+        # Note: `process` collides with a reserved LogRecord attribute
+        # (the OS pid). Use `process_name` for the structured field.
         log.info("conflicts recorded", extra={
             "org_id": org,
-            "process": new_skill.get("process"),
+            "process_name": new_skill.get("process"),
             "count": len(inserted),
         })
         return inserted

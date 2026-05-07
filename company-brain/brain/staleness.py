@@ -90,8 +90,11 @@ def run_staleness_check(org_id: str | None = None) -> dict[str, Any]:
                 "stale_flagged_at": _now_utc().isoformat(),
             }).eq("id", skill["id"]).execute()
             flagged += 1
+            # Note: `process` is a reserved attribute on LogRecord (it's
+            # the OS pid), so we use `process_name` here — the JSON
+            # formatter will surface it under "extra".
             logger.info("flagged stale skill", extra={
-                "process": skill.get("process_name"), "reason": reason,
+                "process_name": skill.get("process_name"), "reason": reason,
             })
         elif (not should_flag) and currently_flagged:
             client.table("skills").update({

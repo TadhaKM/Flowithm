@@ -74,7 +74,7 @@ is the scheduler-driven ingestor that **fetches** message history.
 | Module | Purpose |
 |---|---|
 | `text_utils.py` | Owns the `cl100k_base` tiktoken encoder. `count_tokens()`, `cap_tokens(strategy="truncate" \| "middle_out" \| "smart")` — the single canonical token-budget helper used everywhere. |
-| `logger.py` | `get_logger(name)` returns a stdlib logger configured with a JSON formatter writing to stdout. Reserved keys (`org_id`, `duration_ms`, `request_id`, `status_code`, `endpoint`) get top-level keys; the rest of `extra={...}` lands under `"extra"`. `LOG_LEVEL` env var overrides the default INFO. |
+| `logger.py` | `get_logger(name)` returns a stdlib logger configured with a JSON formatter writing to stdout. Reserved keys (`org_id`, `duration_ms`, `request_id`, `status_code`, `endpoint`) get top-level keys; the rest of `extra={...}` lands under `"extra"`. `LOG_LEVEL` env var overrides the default INFO. **`SafeLogger`** subclass overrides `makeRecord` to auto-prefix any extra key that collides with a reserved `LogRecord` attribute (`process`, `name`, `module`, etc.) so a bad call site logs slightly weird keys instead of crashing the workflow it was reporting on. |
 | `anthropic_client.py` | `messages_create(client, **kwargs)` wraps `client.messages.create` with retry (3× exp backoff on 429/5xx/connection errors), per-call timeout (`ANTHROPIC_TIMEOUT_SECONDS`, default 60), and a process-wide circuit breaker that opens after 5 consecutive failures and stays open 60s. `CircuitOpenError` lets callers degrade gracefully. |
 | `chunker.py` | `chunk_text()` — splits a long string into overlapping ~600-token chunks. Pulls its encoder from `text_utils` so there's exactly one cl100k_base instance. |
 | `ingestors.py` | `BaseIngestor` ABC + `Chunk` dataclass shared by every concrete ingestor. `process()` does build → validate → log filtering; `validate()` drops short or null-source chunks. |
@@ -318,8 +318,9 @@ Mirror `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `ADMIN_TOKEN`,
 
 ## Test coverage
 
-`pytest` suite under `tests/`. **118 tests, all passing**, no live
-services required:
+`pytest` suite under `tests/`. **173 tests, all passing**, no live
+services required. Run via `make test` or `make test-coverage` for the
+HTML report.
 
 - `test_chunker.py` — text splitting + overlap
 - `test_query_schemas.py` — SKILL_SCHEMA + WORKFLOW_SCHEMA shape
@@ -330,11 +331,63 @@ services required:
 - `test_api_routes.py` — every internal endpoint via TestClient with
   monkeypatched dependencies
 - `test_smoke.py` — every top-level module imports cleanly
+- `test_text_utils.py` — count_tokens + cap_tokens (truncate / middle_out / smart)
+- `test_staleness.py` — flag/clear lifecycle, threshold env override, `mark_as_reviewed`
+- `test_auth.py` — Bearer parse, bcrypt verify, sliding-window rate
+  limiter, admin token gate (constant-time eq), TestClient assertions on
+  `/api/v1/keys` 401 paths
+- `test_drift.py` — detection happy path, hallucinated skill-id rejection,
+  exception swallowing, `resolve_conflict` accept/dismiss/snooze, archived-target
+  guard, `targets_archived_version` hydration
+- `test_agent_api.py` — `/api/v1/keys` admin gate, `/api/v1/skills*`
+  Bearer auth (valid / invalid / revoked), `/skills/match` empty-result
+  → 404, `/skills/execute` persistence
+- `test_anthropic_client.py` — happy path, retry on rate-limit (exactly 2 calls),
+  circuit breaker opens after 5 consecutive failures, success resets breaker
 
-**Not yet covered:** `brain/drift.py`, `brain/scheduler.py`,
-`brain/staleness.py`, `api/agent.py`, `api/auth.py`, the new ingestors.
-The user has explicitly deferred adding tests for these until before
-deployment.
+`tests/conftest.py` provides:
+- `mock_supabase` — controllable in-memory fake Supabase client
+  (chainable builder + RPC). Patches every `from brain.store import get_client`
+  binding so it reaches the modules that did module-top imports.
+- `mock_voyage` — deterministic 1024-dim vectors keyed on input hash
+- `mock_anthropic` — stubs `messages_create` to return controllable
+  `{ content[].text, stop_reason }` fakes
+- `sample_skill`, `sample_chunks`, `valid_api_key`, `org_id` fixtures
+- `test_client` — FastAPI TestClient
+
+### Coverage (latest `make test-coverage` run)
+
+| Module | Cov | Notes |
+|---|---|---|
+| brain/logger.py | 100% | |
+| brain/chunker.py | 100% | |
+| brain/ingestors.py | 97% | |
+| api/auth.py | 96% | |
+| brain/staleness.py | 92% | |
+| brain/anthropic_client.py | 77% | |
+| api/agent.py | 68% | |
+| brain/text_utils.py | 65% | |
+| api/main.py | 60% | |
+| brain/drift.py | 54% | scheduler-driven paths still lightly covered |
+| brain/store.py | 37% | many helpers exercised only via TestClient |
+| brain/embedder.py | 34% | Voyage retry / batch paths under-tested |
+| brain/query.py | 24% | Claude generation paths skipped — pure orchestration |
+| brain/scheduler.py | 16% | per-org cycle still lightly covered |
+| brain/run_ingest.py | 0% | CLI script |
+| brain/backfill_embeddings.py | 0% | CLI script |
+| **Total** | **52%** | |
+
+Reaching 80% on `store`, `query`, `scheduler`, and `embedder` requires
+expanding the in-memory Supabase fake to model more PostgREST behaviour
++ mocking the async Voyage retry / circuit-breaker timing paths. Those
+are mechanical to add but each one's a small project.
+
+**Two real production bugs caught while writing the suite:**
+- `brain/staleness.py` and `brain/drift.py` both passed `extra={"process": ...}`
+  to `logger.info()`, but `process` is a reserved `LogRecord` attribute
+  (the OS pid). Stdlib logging raises `KeyError` whenever the offending
+  branch fires. Fixed both call sites; `SafeLogger` in `brain/logger.py`
+  now auto-prefixes any future reserved-name collision.
 
 ---
 
@@ -371,6 +424,7 @@ authoritative; full message bodies via `git show <hash>`.
 | `3835def` | Real `/health` probe (Supabase + Anthropic + Voyage + scheduler + circuit-breaker checks) + `APP_VERSION` env (commit 3 of 3) |
 | `8e0af1c` | Production deployment: Dockerfile + railway.json + ui/vercel.json + .dockerignore + DEPLOYMENT.md + CORS lockdown via `FRONTEND_URL` |
 | `a0ad296` | First-run onboarding flow: `/onboarding/connect` source picker + `/onboarding/generate` first-workflow page (with CSS confetti) + onboarding banner on `/brain` + step indicator + middleware whitelist for `/onboarding/*` |
+| _(next)_ | Test suite expansion (118 → 173): `test_text_utils`, `test_staleness`, `test_auth`, `test_drift`, `test_agent_api`, `test_anthropic_client` + `mock_supabase` / `mock_voyage` / `mock_anthropic` fixtures + `pytest-cov` / `freezegun` / `responses` / `pytest-mock` / `pytest-asyncio` deps + `Makefile` + `slow` marker. Caught + fixed two `extra={"process": …}` LogRecord-collision bugs in `staleness.py` and `drift.py`; added `SafeLogger` to prevent recurrence. |
 
 ---
 
