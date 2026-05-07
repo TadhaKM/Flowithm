@@ -108,8 +108,6 @@ class IngestionScheduler:
             list_active_connected_sources,
             update_source_last_synced,
         )
-        from ingest.ingest_notion import NotionIngestor
-        from ingest.ingest_slack import SlackIngestor
 
         # ---- mutex acquisition ----
         # If the lock RPCs aren't migrated yet, we proceed without locking
@@ -159,7 +157,7 @@ class IngestionScheduler:
         for source in sources:
             try:
                 results["sources_checked"] += 1
-                chunks = self._fetch_chunks_for_source(source, SlackIngestor, NotionIngestor)
+                chunks = self._fetch_chunks_for_source(source)
                 for chunk in chunks:
                     stored_id = embed_and_store(chunk)
                     if stored_id is None:
@@ -241,34 +239,54 @@ class IngestionScheduler:
         return summary
 
     @staticmethod
-    def _fetch_chunks_for_source(
-        source: dict[str, Any],
-        SlackCls,
-        NotionCls,
-    ) -> list:
-        """Build the right ingestor for this source row and produce chunks."""
+    def _fetch_chunks_for_source(source: dict[str, Any]) -> list:
+        """Build the right ingestor for this source row and produce chunks.
+        Each branch lazy-imports its ingestor so optional deps (google-*,
+        slack_sdk) only matter when that source_type is actually configured."""
         cfg = source.get("config") or {}
-        since_iso = source.get("last_synced_at")
-        since_dt = _parse_iso(since_iso)
+        since_dt = _parse_iso(source.get("last_synced_at"))
+        stype = source["source_type"]
 
-        if source["source_type"] == "slack":
-            ingestor = SlackCls(
+        if stype == "slack":
+            from ingest.ingest_slack import SlackIngestor
+
+            return SlackIngestor(
                 token=cfg.get("bot_token"),
                 channel_ids=cfg.get("channel_ids") or [],
                 since=since_dt,
-            )
-            return ingestor.process(None)
+            ).process(None)
 
-        if source["source_type"] == "notion":
-            ingestor = NotionCls(
+        if stype == "notion":
+            from ingest.ingest_notion import NotionIngestor
+
+            return NotionIngestor(
                 token=cfg.get("integration_token"),
                 page_ids=cfg.get("page_ids") or [],
                 since=since_dt,
-            )
-            return ingestor.process(None)
+            ).process(None)
+
+        if stype == "gmail":
+            from ingest.ingest_gmail import GmailIngestor
+
+            return GmailIngestor(
+                credentials_json=cfg.get("credentials_json"),
+                label_filters=cfg.get("label_filters") or [],
+                since=since_dt,
+                min_thread_length=int(cfg.get("min_thread_length", 2)),
+            ).process(None)
+
+        if stype == "intercom":
+            from ingest.ingest_intercom import IntercomIngestor
+
+            return IntercomIngestor(
+                access_token=cfg.get("access_token"),
+                since=since_dt,
+                tags=cfg.get("tags"),
+                min_message_count=int(cfg.get("min_message_count", 3)),
+            ).process(None)
 
         # Unknown source type — surfaced as an error in the run summary.
-        raise NotImplementedError(f"no live ingestor for source_type={source['source_type']!r}")
+        raise NotImplementedError(f"no live ingestor for source_type={stype!r}")
 
 
 def _parse_iso(iso: str | None) -> datetime | None:

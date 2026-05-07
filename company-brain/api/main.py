@@ -303,8 +303,10 @@ class SourceUpdate(BaseModel):
 
 
 _REQUIRED_CONFIG_KEYS = {
-    "slack":  {"bot_token", "channel_ids"},
-    "notion": {"integration_token", "page_ids"},
+    "slack":    {"bot_token", "channel_ids"},
+    "notion":   {"integration_token", "page_ids"},
+    "gmail":    {"credentials_json", "label_filters"},
+    "intercom": {"access_token"},
 }
 
 

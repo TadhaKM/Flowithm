@@ -10,6 +10,11 @@ bcrypt
 apscheduler>=3.10.0
 requests
 
+# Gmail ingestor (optional — only needed if you connect a Gmail source)
+google-auth>=2.0.0
+google-auth-oauthlib>=1.0.0
+google-api-python-client>=2.0.0
+
 # dev — testing
 pytest
 httpx

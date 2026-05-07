@@ -35,6 +35,10 @@ def test_ingest_modules_import():
     import ingest.ingest_github  # noqa: F401
     import ingest.ingest_notion  # noqa: F401
     import ingest.ingest_slack  # noqa: F401
+    # google + intercom imports are lazy inside methods, so the modules
+    # themselves import cleanly even without those packages installed.
+    import ingest.ingest_gmail  # noqa: F401
+    import ingest.ingest_intercom  # noqa: F401
     # ingest_pdfs is allowed to be orphaned (no demo data); just verify import
     import ingest.ingest_pdfs  # noqa: F401
 
