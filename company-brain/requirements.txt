@@ -8,6 +8,7 @@ python-dotenv
 tiktoken
 bcrypt
 apscheduler>=3.10.0
+requests
 
 # dev — testing
 pytest
