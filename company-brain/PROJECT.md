@@ -351,7 +351,7 @@ authoritative; full message bodies via `git show <hash>`.
 | `3e6d8e0` | Add PROJECT.md — comprehensive project reference |
 | `813fe4b` | Multi-tenancy schema: `organisations` table + `org_id` columns + backfill + RLS enable + RPC `target_org_id` filter (commit 1 of 3) |
 | `8c60168` | Multi-tenancy backend wiring: every store helper takes `org_id`, scheduler runs per-org, auth extracts org from API key, `POST /setup` endpoint, `X-Org-ID` header on Slack bot calls (commit 2 of 3) |
-| _(next)_ | Multi-tenancy dashboard: `/setup` page, `flowithm_org_id` httpOnly cookie, Next.js middleware redirect, `lib/org.ts` helper, every proxy route forwards `X-Org-ID` (commit 3 of 3) |
+| `4cc4616` | Multi-tenancy dashboard: `/setup` page, `flowithm_org_id` httpOnly cookie, Next.js middleware redirect, `lib/org.ts` helper, every proxy route forwards `X-Org-ID` (commit 3 of 3) |
 
 ---
 
