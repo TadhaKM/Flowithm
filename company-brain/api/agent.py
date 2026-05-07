@@ -186,6 +186,8 @@ class SkillIndexRow(BaseModel):
     step_count: int
     last_updated: str | None = None
     source: str
+    needs_review: bool = False
+    needs_review_reason: str | None = None
 
 
 class SkillIndexResponse(BaseModel):
@@ -230,11 +232,16 @@ def list_skills_endpoint(
     api_key=ApiKeyDep,
     source: str | None = Query(None, description="Filter: slack | notion | manual | github"),
     updated_after: str | None = Query(None, description="ISO 8601 timestamp; only skills updated at or after this time."),
+    needs_review: bool | None = Query(None, description="Filter to only skills with the staleness flag set."),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ) -> dict[str, Any]:
     rows, total = list_skills_index(
-        source=source, updated_after=updated_after, limit=limit, offset=offset
+        source=source,
+        updated_after=updated_after,
+        needs_review=needs_review,
+        limit=limit,
+        offset=offset,
     )
     return {"skills": rows, "total": total}
 
@@ -416,6 +423,8 @@ def _row_to_agent_skill(row: dict[str, Any]) -> dict[str, Any]:
         "source": row.get("source") or "manual",
         "version": int(row.get("version") or 1),
         "last_updated": row.get("generated_at"),
+        "needs_review": bool(row.get("needs_review")),
+        "needs_review_reason": row.get("needs_review_reason"),
     }
 
 
@@ -434,6 +443,8 @@ def _workflow_to_agent_skill(workflow: dict[str, Any]) -> dict[str, Any]:
         "source": workflow.get("source") or "manual",
         "version": int(workflow.get("version") or 1) if workflow.get("version") is not None else 1,
         "last_updated": workflow.get("generated_at"),
+        "needs_review": bool(workflow.get("needs_review")),
+        "needs_review_reason": workflow.get("needs_review_reason"),
     }
 
 

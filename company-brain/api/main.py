@@ -268,6 +268,17 @@ def skill_conflicts(skill_id: str) -> list[dict]:
     return get_conflict_history(skill_id)
 
 
+@app.post("/skills/{skill_id}/review")
+def skill_mark_reviewed(skill_id: str) -> dict:
+    """Mark a skill as freshly reviewed — clears needs_review + bumps reviewed_at."""
+    from brain.staleness import mark_as_reviewed
+
+    row = mark_as_reviewed(skill_id)
+    if not row:
+        raise HTTPException(404, f"skill not found: {skill_id}")
+    return row
+
+
 # ---------------------------------------------------------------------------
 # Continuous ingestion: status, manual trigger, source CRUD (admin-only)
 # ---------------------------------------------------------------------------

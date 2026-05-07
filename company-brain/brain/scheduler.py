@@ -188,6 +188,19 @@ class IngestionScheduler:
                 logger.error(msg)
                 results["errors"].append(msg)
 
+        # Staleness pass — runs every cycle regardless of new chunk count
+        # so reviewed_at expiry surfaces even on no-op syncs.
+        try:
+            from brain.staleness import run_staleness_check
+
+            stale = run_staleness_check()
+            results["stale_flagged"] = stale.get("newly_flagged", 0)
+            results["stale_cleared"] = stale.get("flags_cleared", 0)
+        except Exception as exc:
+            msg = f"run_staleness_check: {exc}"
+            logger.error(msg)
+            results["errors"].append(msg)
+
         duration_seconds = max(0, int((_now_utc() - started_at).total_seconds()))
         summary = {
             **results,

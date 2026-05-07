@@ -135,6 +135,18 @@ alter table skills alter column description set default '';
 alter table skills add column if not exists version              integer default 1;
 alter table skills add column if not exists previous_version_id  uuid references skills(id);
 
+-- Staleness: brain/staleness.run_staleness_check flips needs_review when a
+-- skill has no reviewed_at and is older than $STALE_THRESHOLD_DAYS, or when
+-- the most-recent review is older than the threshold. Cleared by the same
+-- function (and by mark_as_reviewed) so reviewing a flagged skill doesn't
+-- need a separate "unflag" step.
+alter table skills add column if not exists needs_review        boolean default false;
+alter table skills add column if not exists needs_review_reason text;
+alter table skills add column if not exists stale_flagged_at    timestamptz;
+create index if not exists skills_needs_review_idx
+    on skills (needs_review)
+    where needs_review = true;
+
 -- GIN trigram index makes similarity(process_name, ?) searches cheap.
 -- Used by the find_similar_workflow RPC below (Slack bot's "Update existing"
 -- detection). Optional — without it queries still work, just slower at scale.
@@ -267,6 +279,11 @@ create table if not exists ingest_runs (
 );
 create index if not exists ingest_runs_started_idx on ingest_runs (started_at desc);
 
+-- Per-cycle staleness counters; populated by brain/staleness.run_staleness_check
+-- which the scheduler calls at the end of every ingest cycle.
+alter table ingest_runs add column if not exists stale_flagged integer not null default 0;
+alter table ingest_runs add column if not exists stale_cleared integer not null default 0;
+
 
 -- ---------------------------------------------------------------------------
 -- ingest_lock — multi-worker mutex
@@ -348,19 +365,21 @@ create or replace function match_skills(
     match_count     int
 )
 returns table (
-    id              uuid,
-    process_name    text,
-    description     text,
-    process_trigger text,
-    steps           jsonb,
-    decision_rules  jsonb,
-    approvals       jsonb,
-    exceptions      jsonb,
-    sources         jsonb,
-    source          text,
-    version         integer,
-    generated_at    timestamptz,
-    similarity      float
+    id                  uuid,
+    process_name        text,
+    description         text,
+    process_trigger     text,
+    steps               jsonb,
+    decision_rules      jsonb,
+    approvals           jsonb,
+    exceptions          jsonb,
+    sources             jsonb,
+    source              text,
+    version             integer,
+    generated_at        timestamptz,
+    needs_review        boolean,
+    needs_review_reason text,
+    similarity          float
 )
 language sql
 stable
@@ -378,6 +397,8 @@ as $$
         s.source,
         s.version,
         s.generated_at,
+        coalesce(s.needs_review, false) as needs_review,
+        s.needs_review_reason,
         1 - (s.summary_embedding <=> query_embedding) as similarity
     from skills s
     where s.archived = false

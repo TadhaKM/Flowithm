@@ -77,6 +77,9 @@ def _row_to_workflow(r: dict[str, Any]) -> dict[str, Any]:
         "archived_at": r.get("archived_at"),
         "reviewed_at": r.get("reviewed_at"),
         "generated_at": r.get("generated_at"),
+        "needs_review": bool(r.get("needs_review")),
+        "needs_review_reason": r.get("needs_review_reason"),
+        "version": int(r.get("version") or 1) if r.get("version") is not None else 1,
     }
 
 
@@ -201,6 +204,7 @@ def find_similar_workflow(
 def list_skills_index(
     source: str | None = None,
     updated_after: str | None = None,
+    needs_review: bool | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[dict[str, Any]], int]:
@@ -213,7 +217,7 @@ def list_skills_index(
     base = (
         client.table(SKILLS_TABLE)
         .select(
-            "id,process_name,process_trigger,steps,source,generated_at",
+            "id,process_name,process_trigger,steps,source,generated_at,needs_review,needs_review_reason",
             count="exact",
         )
         .eq("archived", False)
@@ -222,6 +226,10 @@ def list_skills_index(
         base = base.eq("source", source)
     if updated_after:
         base = base.gte("generated_at", updated_after)
+    if needs_review is True:
+        base = base.eq("needs_review", True)
+    elif needs_review is False:
+        base = base.eq("needs_review", False)
     result = base.order("generated_at", desc=True).range(offset, offset + max(limit, 1) - 1).execute()
     rows = []
     for r in result.data or []:
@@ -233,6 +241,8 @@ def list_skills_index(
             "step_count": len(steps),
             "last_updated": r.get("generated_at"),
             "source": r.get("source") or "manual",
+            "needs_review": bool(r.get("needs_review")),
+            "needs_review_reason": r.get("needs_review_reason"),
         })
     return rows, int(result.count or 0)
 
@@ -492,6 +502,8 @@ def insert_ingest_run(summary: dict[str, Any]) -> str:
         "new_chunks":       int(summary.get("new_chunks", 0)),
         "skipped_chunks":   int(summary.get("skipped_chunks", 0)),
         "new_conflicts":    int(summary.get("new_conflicts", 0)),
+        "stale_flagged":    int(summary.get("stale_flagged", 0)),
+        "stale_cleared":    int(summary.get("stale_cleared", 0)),
         "errors":           summary.get("errors") or [],
     }
     result = client.table("ingest_runs").insert(payload).execute()
