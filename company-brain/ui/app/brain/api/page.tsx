@@ -560,6 +560,12 @@ const res = await fetch(
   { headers: { Authorization: 'Bearer YOUR_API_KEY' } }
 );
 const { skill } = await res.json();
+
+// Always check needs_review before auto-executing
+if (skill.needs_review) {
+  return escalateToHuman(skill.process, skill.needs_review_reason);
+}
+
 // skill.steps          — the exact workflow to execute
 // skill.decision_rules — the if/then logic
 // skill.approvals      — when to escalate`,
@@ -576,16 +582,24 @@ def get_workflow(situation: str) -> dict:
 
 # Use in your agent
 workflow = get_workflow("customer requesting refund after 45 days")
+
+# Always check needs_review before auto-executing
+if workflow.get("needs_review"):
+    return escalate_to_human(workflow["process"], workflow.get("needs_review_reason"))
+
 for step in workflow["steps"]:
     execute_step(step)`,
 
-  claude: `# Define Flowithm as a tool for your Claude agent
+  claude: `# Define Flowithm as a tool for your Claude agent.
+# Once Claude calls it, inspect the response — if needs_review is true,
+# stop and escalate rather than acting on the workflow.
 tools = [{
     "name": "get_company_workflow",
     "description": (
         "Retrieves the exact workflow your company uses for a given "
         "situation. Call this before taking any action that involves "
-        "a company process."
+        "a company process. Check the returned skill.needs_review flag "
+        "before executing — if true, escalate to a human."
     ),
     "input_schema": {
         "type": "object",

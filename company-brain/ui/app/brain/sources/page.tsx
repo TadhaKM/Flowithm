@@ -27,6 +27,8 @@ type IngestStatus = {
     new_chunks: number;
     skipped_chunks: number;
     new_conflicts: number;
+    stale_flagged?: number;
+    stale_cleared?: number;
     errors: string[];
   } | null;
   next_run_at: string | null;
@@ -259,6 +261,15 @@ function LastRunBanner({
           <Link href="/brain" className="text-xs text-amber-300 underline-offset-4 hover:underline">
             Review →
           </Link>
+        )}
+        {(last.stale_flagged || 0) > 0 && (
+          <>
+            <span className="text-zinc-700">·</span>
+            <span>
+              <span className="tabular-nums text-zinc-300">{last.stale_flagged}</span> workflow
+              {last.stale_flagged === 1 ? "" : "s"} need review
+            </span>
+          </>
         )}
         {hasErrors && (
           <>

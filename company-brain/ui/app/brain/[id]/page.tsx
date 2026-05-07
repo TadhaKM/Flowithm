@@ -33,6 +33,8 @@ type Workflow = {
   archived_at?: string | null;
   reviewed_at?: string | null;
   generated_at?: string | null;
+  needs_review?: boolean;
+  needs_review_reason?: string | null;
 };
 
 export default function BrainDetail() {
@@ -155,14 +157,12 @@ export default function BrainDetail() {
     if (!workflow || marking) return;
     setMarking(true);
     try {
-      const res = await fetch(`/api/brain/${workflow.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ reviewed_at: "now" }),
-      });
+      // POST /api/brain/{id}/review — proxies to FastAPI POST /skills/{id}/review,
+      // which both bumps reviewed_at AND clears the needs_review staleness flag.
+      const res = await fetch(`/api/brain/${workflow.id}/review`, { method: "POST" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const updated = (await res.json()) as Workflow;
-      setWorkflow(updated);
+      setWorkflow((prev) => (prev ? { ...prev, ...updated, needs_review: false, needs_review_reason: null } : prev));
       setActionMsg("Marked as reviewed");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -329,6 +329,28 @@ export default function BrainDetail() {
             {workflow.archived && (
               <div className="mb-4 bg-zinc-900 border border-zinc-800 text-zinc-400 rounded-xl px-4 py-2.5 text-xs">
                 This workflow is archived.
+              </div>
+            )}
+
+            {workflow.needs_review && (
+              <div className="mb-4 flex items-center justify-between gap-4 rounded-xl border border-zinc-700 bg-zinc-900 px-4 py-3 text-sm">
+                <div className="flex items-center gap-3 text-zinc-300">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-zinc-400 shrink-0">
+                    <circle cx="12" cy="12" r="10" />
+                    <polyline points="12 6 12 12 16 14" />
+                  </svg>
+                  <span>
+                    {workflow.needs_review_reason || "This workflow hasn't been reviewed in a while"}
+                    {" — it may be out of date."}
+                  </span>
+                </div>
+                <button
+                  onClick={markReviewed}
+                  disabled={marking}
+                  className="shrink-0 rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-700 disabled:opacity-50 transition-colors"
+                >
+                  {marking ? "Marking…" : "Mark as reviewed"}
+                </button>
               </div>
             )}
 

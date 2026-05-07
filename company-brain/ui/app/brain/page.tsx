@@ -29,6 +29,8 @@ type Workflow = {
   source_metadata: Record<string, unknown>;
   generated_at?: string | null;
   reviewed_at?: string | null;
+  needs_review?: boolean;
+  needs_review_reason?: string | null;
 };
 
 type Conflict = {
@@ -85,6 +87,7 @@ export default function BrainPage() {
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
   const [sort, setSort] = useState<SortOption>("newest");
   const [view, setView] = useState<ViewMode>("grid");
+  const [needsReviewOnly, setNeedsReviewOnly] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -165,6 +168,9 @@ export default function BrainPage() {
 
   const filtered = useMemo(() => {
     let result = workflows;
+    if (needsReviewOnly) {
+      result = result.filter((w) => w.needs_review === true);
+    }
     if (sourceFilter !== "all") {
       result = result.filter((w) => w.source === sourceFilter);
     }
@@ -191,10 +197,20 @@ export default function BrainPage() {
       sorted.sort((a, b) => (b.steps?.length || 0) - (a.steps?.length || 0));
     }
     return sorted;
-  }, [workflows, sourceFilter, debouncedSearch, sort]);
+  }, [workflows, sourceFilter, debouncedSearch, sort, needsReviewOnly]);
 
   function removeFromList(id: string) {
     setWorkflows((current) => current.filter((w) => w.id !== id));
+  }
+
+  function markReviewedLocal(id: string) {
+    setWorkflows((current) =>
+      current.map((w) =>
+        w.id === id
+          ? { ...w, needs_review: false, needs_review_reason: null, reviewed_at: new Date().toISOString() }
+          : w,
+      ),
+    );
   }
 
   return (
@@ -216,6 +232,8 @@ export default function BrainPage() {
           loading={loading}
           lastSyncedAt={lastSyncedAt}
           activeSourcesCount={activeSourcesCount}
+          needsReviewOnly={needsReviewOnly}
+          onToggleNeedsReview={() => setNeedsReviewOnly((v) => !v)}
         />
 
         {conflictCount > 0 && <ConflictBanner count={conflictCount} />}
@@ -259,9 +277,9 @@ export default function BrainPage() {
             }}
           />
         ) : view === "grid" ? (
-          <WorkflowsGrid workflows={filtered} onArchived={removeFromList} />
+          <WorkflowsGrid workflows={filtered} onArchived={removeFromList} onReviewed={markReviewedLocal} />
         ) : (
-          <WorkflowsList workflows={filtered} onArchived={removeFromList} />
+          <WorkflowsList workflows={filtered} onArchived={removeFromList} onReviewed={markReviewedLocal} />
         )}
       </div>
 
@@ -316,11 +334,15 @@ function MetricsRow({
   loading,
   lastSyncedAt,
   activeSourcesCount,
+  needsReviewOnly,
+  onToggleNeedsReview,
 }: {
   workflows: Workflow[];
   loading: boolean;
   lastSyncedAt: string | null;
   activeSourcesCount: number | null;
+  needsReviewOnly: boolean;
+  onToggleNeedsReview: () => void;
 }) {
   const total = workflows.length;
   const sources = useMemo(() => {
@@ -337,13 +359,10 @@ function MetricsRow({
     }
     return latest;
   }, [workflows]);
-  const coverage = useMemo(() => {
-    if (workflows.length === 0) return 0;
-    const ok = workflows.filter(
-      (w) => (w.steps?.length || 0) >= 3 && (w.decision_rules?.length || 0) >= 1,
-    ).length;
-    return Math.round((ok / workflows.length) * 100);
-  }, [workflows]);
+  const needsReviewCount = useMemo(
+    () => workflows.filter((w) => w.needs_review === true).length,
+    [workflows],
+  );
 
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 mb-8">
@@ -384,20 +403,36 @@ function MetricsRow({
         </p>
       </MetricCard>
 
-      <MetricCard
-        label="Workflow quality"
-        icon={<CheckCircleIcon />}
-        loading={loading}
-        tooltip="Workflows with full decision logic (3+ steps and 1+ decision rule)"
+      <button
+        type="button"
+        onClick={onToggleNeedsReview}
+        title={
+          needsReviewOnly
+            ? "Click to clear filter"
+            : "Click to filter the grid to skills that need review"
+        }
+        className={`text-left rounded-xl border p-4 bg-zinc-900/40 transition-colors hover:bg-zinc-900/70 ${
+          needsReviewOnly
+            ? "border-zinc-500"
+            : "border-zinc-800"
+        }`}
       >
-        <CountUp value={coverage} suffix="%" />
-        <div className="mt-3 h-1 bg-zinc-800 rounded-full overflow-hidden">
-          <div
-            className="h-full bg-[#1D9E75] transition-all duration-700 ease-out"
-            style={{ width: `${coverage}%` }}
-          />
+        <div className="flex items-center justify-between text-xs uppercase tracking-wider text-zinc-500">
+          <span>Needs review</span>
+          <ClockIcon />
         </div>
-      </MetricCard>
+        <div className="mt-2 flex items-baseline gap-2">
+          <span className="text-2xl font-medium tracking-tight text-zinc-100 tabular-nums">
+            {loading ? "—" : needsReviewCount}
+          </span>
+          <span className="text-xs text-zinc-500">need review</span>
+        </div>
+        {needsReviewOnly && (
+          <p className="mt-2 text-[11px] text-zinc-500">
+            Filter active — click again to clear
+          </p>
+        )}
+      </button>
 
       <MetricCard label="Last synced" icon={<ClockIcon />} loading={loading}>
         <span className="text-base font-medium text-zinc-100">
@@ -839,9 +874,11 @@ function SearchFilterBar({
 function WorkflowsGrid({
   workflows,
   onArchived,
+  onReviewed,
 }: {
   workflows: Workflow[];
   onArchived: (id: string) => void;
+  onReviewed: (id: string) => void;
 }) {
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -851,6 +888,7 @@ function WorkflowsGrid({
           workflow={w}
           index={i}
           onArchived={onArchived}
+          onReviewed={onReviewed}
         />
       ))}
     </div>
@@ -861,10 +899,12 @@ function WorkflowCard({
   workflow,
   index,
   onArchived,
+  onReviewed,
 }: {
   workflow: Workflow;
   index: number;
   onArchived: (id: string) => void;
+  onReviewed: (id: string) => void;
 }) {
   const router = useRouter();
   const sourceMeta = workflow.source_metadata || {};
@@ -892,6 +932,17 @@ function WorkflowCard({
           {relativeTime(workflow.generated_at)}
         </span>
       </div>
+
+      {workflow.needs_review && (
+        <div className="mb-2">
+          <span
+            title={workflow.needs_review_reason || "Hasn't been reviewed in a while"}
+            className="inline-flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-800/60 px-2 py-0.5 text-[11px] font-medium uppercase tracking-wider text-zinc-300"
+          >
+            Needs review
+          </span>
+        </div>
+      )}
 
       <h3 className="text-base font-medium text-zinc-100 leading-snug line-clamp-2">
         {workflow.process}
@@ -949,7 +1000,7 @@ function WorkflowCard({
         >
           View workflow →
         </Link>
-        <KebabMenu workflow={workflow} onArchived={onArchived} />
+        <KebabMenu workflow={workflow} onArchived={onArchived} onReviewed={onReviewed} />
       </div>
     </div>
   );
@@ -958,9 +1009,11 @@ function WorkflowCard({
 function WorkflowsList({
   workflows,
   onArchived,
+  onReviewed,
 }: {
   workflows: Workflow[];
   onArchived: (id: string) => void;
+  onReviewed: (id: string) => void;
 }) {
   const router = useRouter();
   return (
@@ -993,7 +1046,17 @@ function WorkflowsList({
                 <SourceBadge type={w.source} />
               </td>
               <td className="px-3 py-3 text-zinc-100 font-medium truncate max-w-xs">
-                {w.process}
+                <span className="inline-flex items-center gap-2">
+                  {w.process}
+                  {w.needs_review && (
+                    <span
+                      title={w.needs_review_reason || "Hasn't been reviewed in a while"}
+                      className="rounded-md border border-zinc-700 bg-zinc-800/60 px-1.5 py-0 text-[10px] uppercase tracking-wider text-zinc-300"
+                    >
+                      Needs review
+                    </span>
+                  )}
+                </span>
               </td>
               <td className="px-3 py-3 text-zinc-500 italic truncate max-w-xs hidden md:table-cell">
                 {w.trigger}
@@ -1016,7 +1079,7 @@ function WorkflowsList({
                   >
                     View
                   </Link>
-                  <KebabMenu workflow={w} onArchived={onArchived} />
+                  <KebabMenu workflow={w} onArchived={onArchived} onReviewed={onReviewed} />
                 </div>
               </td>
             </tr>
@@ -1078,13 +1141,16 @@ function SourceBadge({ type }: { type: string }) {
 function KebabMenu({
   workflow,
   onArchived,
+  onReviewed,
 }: {
   workflow: Workflow;
   onArchived: (id: string) => void;
+  onReviewed: (id: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [archiving, setArchiving] = useState(false);
   const [confirmArchive, setConfirmArchive] = useState(false);
+  const [reviewing, setReviewing] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -1108,6 +1174,21 @@ function KebabMenu({
       // ignore
     }
     setOpen(false);
+  }
+
+  async function markReviewed() {
+    if (reviewing) return;
+    setReviewing(true);
+    try {
+      const res = await fetch(`/api/brain/${workflow.id}/review`, { method: "POST" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      onReviewed(workflow.id);
+    } catch (e) {
+      console.error("mark reviewed failed:", e);
+    } finally {
+      setReviewing(false);
+      setOpen(false);
+    }
   }
 
   async function archive() {
@@ -1153,6 +1234,15 @@ function KebabMenu({
           >
             Copy JSON
           </button>
+          {workflow.needs_review && (
+            <button
+              onClick={markReviewed}
+              disabled={reviewing}
+              className="w-full text-left text-xs text-zinc-200 hover:bg-zinc-800 transition-colors px-3 py-2"
+            >
+              {reviewing ? "Marking…" : "Mark as reviewed"}
+            </button>
+          )}
           <button
             onClick={archive}
             disabled={archiving}
