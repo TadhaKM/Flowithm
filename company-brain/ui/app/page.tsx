@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API_URL = "";
 
 const DEMO_CHIPS = [
   {
@@ -69,7 +69,7 @@ export default function Home() {
 
   async function fetchHistory() {
     try {
-      const res = await fetch(`${API_URL}/history`);
+      const res = await fetch(`/api/workflows/history`);
       if (!res.ok) return;
       const data = (await res.json()) as Workflow[];
       setHistory(data);
@@ -83,7 +83,7 @@ export default function Home() {
     setChipLoading(chip.slug);
     setError(null);
     try {
-      const res = await fetch(`${API_URL}/demo/${chip.slug}`);
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/demo/${chip.slug}`);
       if (!res.ok)
         throw new Error(`Demo not found: ${chip.slug} (HTTP ${res.status})`);
       const text = await res.text();
@@ -102,7 +102,7 @@ export default function Home() {
     setError(null);
     setWorkflow(null);
     try {
-      const res = await fetch(`${API_URL}/workflows/generate`, {
+      const res = await fetch(`/api/workflows/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: processName, content }),
@@ -128,7 +128,7 @@ export default function Home() {
     setClearConfirm(false);
     setClearingHistory(true);
     try {
-      const res = await fetch(`${API_URL}/history`, { method: "DELETE" });
+      const res = await fetch(`/api/workflows/history`, { method: "DELETE" });
       if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
       setHistory([]);
     } catch (e) {
