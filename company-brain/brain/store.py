@@ -457,16 +457,19 @@ def insert_api_request(
 # Continuous ingestion: connected_sources + ingest_runs
 # ---------------------------------------------------------------------------
 
+from brain.crypto import decrypt_config, encrypt_config
+
 REDACTED = "***"
 _REDACT_KEYS = {"bot_token", "integration_token", "token", "api_key", "secret"}
 
 
 def _redact_config(config: dict[str, Any] | None) -> dict[str, Any]:
-    """Replace any token-like value in a connected_source.config blob with ***."""
-    if not isinstance(config, dict):
+    """Decrypt (if needed) then replace token-like values with ***."""
+    decrypted = decrypt_config(config)
+    if not isinstance(decrypted, dict):
         return {}
     out: dict[str, Any] = {}
-    for k, v in config.items():
+    for k, v in decrypted.items():
         if k in _REDACT_KEYS and v:
             out[k] = REDACTED
         else:
@@ -493,14 +496,17 @@ def list_connected_sources(redact: bool = True, org_id: str | None = None) -> li
 def list_active_connected_sources(org_id: str | None = None) -> list[dict[str, Any]]:
     """Used by the scheduler. With org_id=None, returns ACTIVE sources across
     every org (so the scheduler can group by org). With a specific org_id,
-    returns just that tenant's sources. Un-redacted in both cases — the
+    returns just that tenant's sources. Decrypted in both cases — the
     scheduler needs the raw tokens; never expose this to the dashboard."""
     client = get_client()
     base = client.table("connected_sources").select("*").eq("is_active", True)
     if org_id is not None:
         base = base.eq("org_id", org_id)
     result = base.execute()
-    return result.data or []
+    rows = result.data or []
+    for r in rows:
+        r["config"] = decrypt_config(r.get("config"))
+    return rows
 
 
 def get_connected_source(source_id: str, org_id: str | None = None) -> dict[str, Any] | None:
@@ -514,7 +520,10 @@ def get_connected_source(source_id: str, org_id: str | None = None) -> dict[str,
         .execute()
     )
     rows = result.data or []
-    return rows[0] if rows else None
+    if not rows:
+        return None
+    rows[0]["config"] = decrypt_config(rows[0].get("config"))
+    return rows[0]
 
 
 def insert_connected_source(
@@ -529,7 +538,7 @@ def insert_connected_source(
         .insert({
             "source_type": source_type,
             "display_name": display_name,
-            "config": config,
+            "config": encrypt_config(config),
             "is_active": True,
             "org_id": org_id or _default_org_id(),
         })
@@ -543,6 +552,8 @@ def insert_connected_source(
 def update_connected_source(
     source_id: str, patch: dict[str, Any], org_id: str | None = None
 ) -> dict[str, Any] | None:
+    if "config" in patch:
+        patch = {**patch, "config": encrypt_config(patch["config"])}
     client = get_client()
     result = (
         client.table("connected_sources")

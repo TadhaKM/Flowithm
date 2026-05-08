@@ -86,6 +86,7 @@ is the scheduler-driven ingestor that **fetches** message history.
 | `staleness.py` | `run_staleness_check()` flags skills older than `STALE_THRESHOLD_DAYS` without recent review; `mark_as_reviewed(id)` clears the flag and bumps `reviewed_at`. |
 | `backfill_embeddings.py` | One-shot CLI: embeds every existing skill row missing a `summary_embedding`. Idempotent. |
 | `test_drift.py` | Manual verification script (NOT pytest). Round-trips drift end-to-end against live Supabase + Anthropic. |
+| `crypto.py` | AES-256-GCM encryption for `connected_sources.config` blobs. `encrypt_config(dict) → {"_enc": "<base64>"}`, `decrypt_config(blob) → dict`. Key from `ENCRYPTION_KEY` env var (32 bytes, hex-encoded). Backward-compatible: plaintext configs pass through on read and get encrypted on the next write. |
 | `schema.sql` | The single source of truth for the database schema. Re-runnable. |
 
 ### `ingest/`
@@ -188,7 +189,7 @@ Postgres on Supabase, with `vector` (pgvector) and `pg_trgm` extensions.
 | `api_keys` | Public agent API auth. `key_hash` (bcrypt), `key_prefix` (indexed for candidate lookup), `request_count`, `last_used_at`, `is_active`. `org_id` resolved at auth time and propagated to every downstream query. |
 | `api_requests` | Per-call audit log written from BackgroundTasks. Includes endpoint, query, matched_skill_id, response_time_ms. |
 | `executions` | Agent feedback loop — `outcome ∈ {completed, escalated, exception_triggered}` + optional `exception_note` (triggers a drift check via Claude judgement). `org_id`. |
-| `connected_sources` | Per-tenant ingest source configs. `source_type` + jsonb `config` (tokens stored server-side; redacted in API responses). `org_id`. |
+| `connected_sources` | Per-tenant ingest source configs. `source_type` + jsonb `config` (AES-256-GCM encrypted at rest via `brain/crypto.py`; decrypted on read by the scheduler; redacted in API responses). `org_id`. |
 | `ingest_runs` | One row per scheduled or manual run. `new_chunks`, `skipped_chunks`, `new_conflicts`, `stale_flagged`, `stale_cleared`, `errors` jsonb array. `org_id`. |
 | `ingest_lock` | Singleton row-mutex. `try_acquire_ingest_lock(holder)` / `release_ingest_lock()`. 15-min stale-lock timeout for self-healing. **Global** — not per-org. |
 
@@ -300,6 +301,7 @@ proxy times round-trip itself).
 |---|---|---|
 | `ANTHROPIC_API_KEY` | — | Required. Claude Sonnet 4.6 + Haiku 4.5. |
 | `VOYAGE_API_KEY` | — | Required. Voyage `voyage-3` embeddings (1024-dim). |
+| `ENCRYPTION_KEY` | — | **Required.** AES-256-GCM key for encrypting third-party tokens in `connected_sources.config`. 32 bytes, hex-encoded. Generate: `python -c "import secrets; print(secrets.token_hex(32))"` |
 | `SUPABASE_URL` / `SUPABASE_SERVICE_KEY` | — | Required. Server-side Supabase access. |
 | `SLACK_BOT_TOKEN` / `SLACK_SIGNING_SECRET` / `SLACK_APP_TOKEN` | — | Slack bot only. |
 | `FLOWITHM_URL` | `http://localhost:3000` | Dashboard host. Used by Slack bot for deeplinks. |
@@ -334,7 +336,7 @@ Must be set independently — Next.js doesn't read the parent `.env`.
 
 ## Test coverage
 
-`pytest` suite under `tests/`. **173 tests, all passing**, no live
+`pytest` suite under `tests/`. **185 tests, all passing**, no live
 services required. Run via `make test` or `make test-coverage` for the
 HTML report.
 
@@ -445,6 +447,7 @@ authoritative; full message bodies via `git show <hash>`.
 | `9ef5031` | Security pass 2: admin gate every org-scoped FastAPI endpoint (C-4), bootstrap-token gate on `/setup` (C-5), lock down `/api/admin/usage` with session + api_keys join (C-6), `MissingOrgSession` on admin proxies (C-3 partial), Slack bot sends admin token (H-4), drift cascade gets defensive `org_id` filter (M-5). Dashboard tests updated; new `unauthed_client` fixture for 401 paths. |
 | `da38d50` | Security pass 3: HMAC-signed Slack action_value blobs (H-5) — `slack/sign.py` packs `<b64body>.<b64sig>`, formatter signs every interactive button payload, handlers reject tampered/unsigned values. |
 | `6dd2931` | Supabase Auth: `users` table, `/login` + `/signup` pages, session middleware, org resolution from auth session, `/api/auth/signup` server route, sign-out in header. Replaces `flowithm_org_id` cookie with real authenticated sessions (C-3). |
+| `_______` | AES-256-GCM encryption for `connected_sources.config`: `brain/crypto.py`, wired into store read/write paths, backward-compatible with plaintext rows, 11 new tests (185 total). |
 
 ---
 
