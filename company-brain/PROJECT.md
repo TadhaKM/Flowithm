@@ -447,7 +447,7 @@ authoritative; full message bodies via `git show <hash>`.
 | `9ef5031` | Security pass 2: admin gate every org-scoped FastAPI endpoint (C-4), bootstrap-token gate on `/setup` (C-5), lock down `/api/admin/usage` with session + api_keys join (C-6), `MissingOrgSession` on admin proxies (C-3 partial), Slack bot sends admin token (H-4), drift cascade gets defensive `org_id` filter (M-5). Dashboard tests updated; new `unauthed_client` fixture for 401 paths. |
 | `da38d50` | Security pass 3: HMAC-signed Slack action_value blobs (H-5) — `slack/sign.py` packs `<b64body>.<b64sig>`, formatter signs every interactive button payload, handlers reject tampered/unsigned values. |
 | `6dd2931` | Supabase Auth: `users` table, `/login` + `/signup` pages, session middleware, org resolution from auth session, `/api/auth/signup` server route, sign-out in header. Replaces `flowithm_org_id` cookie with real authenticated sessions (C-3). |
-| `_______` | AES-256-GCM encryption for `connected_sources.config`: `brain/crypto.py`, wired into store read/write paths, backward-compatible with plaintext rows, 11 new tests (185 total). |
+| `16f5cb7` | AES-256-GCM encryption for `connected_sources.config`: `brain/crypto.py`, wired into store read/write paths, backward-compatible with plaintext rows, 11 new tests (185 total). |
 
 ---
 
