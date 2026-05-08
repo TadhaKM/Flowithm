@@ -171,6 +171,11 @@ async def lifespan(app: FastAPI):
             scheduler.stop()
         except Exception:
             pass
+        try:
+            from brain.drift import _DRIFT_POOL
+            _DRIFT_POOL.shutdown(wait=False)
+        except Exception:
+            pass
 
 
 app = FastAPI(title="Flowithm API", lifespan=lifespan)

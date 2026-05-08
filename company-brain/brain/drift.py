@@ -350,7 +350,11 @@ CHUNK_TOP_K_CANDIDATES = 2          # ask Claude about the top-N most similar sk
 CHUNK_DRIFT_PREVIEW_CHARS = 1500    # cap chunk length sent to the LLM
 
 
-def check_chunks_against_skills(chunks: list, org_id: str | None = None) -> list[dict[str, Any]]:
+def check_chunks_against_skills(
+    chunks: list,
+    org_id: str | None = None,
+    precomputed_embeddings: list[list[float]] | None = None,
+) -> list[dict[str, Any]]:
     """Per-chunk drift check against existing non-archived skills.
 
     For each incoming chunk:
@@ -384,9 +388,14 @@ def check_chunks_against_skills(chunks: list, org_id: str | None = None) -> list
         anthropic_client = _get_anthropic()
 
         # Build list of (chunk_index, chunk_text, skill_dict) work items.
+        # M-4: reuse precomputed embeddings when available instead of
+        # re-calling Voyage (doubles Voyage spend otherwise).
         work_items: list[tuple[int, str, dict[str, Any]]] = []
-        for i_chunk, text in usable:
-            vec = get_embedding(text)
+        for usable_idx, (i_chunk, text) in enumerate(usable):
+            if precomputed_embeddings and usable_idx < len(precomputed_embeddings):
+                vec = precomputed_embeddings[usable_idx]
+            else:
+                vec = get_embedding(text)
             resp = client.rpc("match_skills", {
                 "query_embedding": vec,
                 "match_count": CHUNK_TOP_K_CANDIDATES,
@@ -689,27 +698,47 @@ def resolve_conflict(
         )
 
     updated_workflow = _apply_update_via_claude(old_skill, conflict["suggested_update"])
-
-    new_id = save_workflow(
-        updated_workflow,
-        source=old_skill.get("source") or "manual",
-        source_metadata=old_skill.get("source_metadata") or {},
-        raw_text=old_skill.get("raw_text") or "",
-        org_id=org,
-    )
     new_version = int(old_skill.get("version") or 1) + 1
 
-    # B-1: wrap the 4 follow-up writes in a single Postgres transaction
-    # via RPC so a mid-sequence failure can't corrupt the skill graph.
-    client.rpc("accept_conflict", {
-        "p_new_skill_id": new_id,
+    # Compute summary embedding before the transactional INSERT so the
+    # new skill is immediately visible to /api/v1/skills/match (H-7).
+    summary_embedding = None
+    try:
+        summary_text = (
+            (updated_workflow.get("process") or "") + "\n" +
+            (updated_workflow.get("description") or "") + "\n" +
+            (updated_workflow.get("trigger") or "")
+        ).strip()
+        if summary_text:
+            summary_embedding = get_embedding(summary_text)
+    except Exception as exc:
+        log.error("accept summary embedding failed", exc_info=True,
+                  extra={"error": str(exc)})
+
+    # B-1 revised: archive old → INSERT new → cascade → mark accepted
+    # all inside one Postgres transaction. Avoids the unique-active-name
+    # trap and orphan version=1 skills.
+    resp = client.rpc("accept_conflict", {
         "p_old_skill_id": str(old_skill["id"]),
         "p_conflict_id": conflict_id,
         "p_new_version": new_version,
         "p_resolved_by": resolved_by,
         "p_org_id": org,
+        "p_process_name": updated_workflow.get("process") or "",
+        "p_description": updated_workflow.get("description") or "",
+        "p_process_trigger": updated_workflow.get("trigger") or "",
+        "p_steps": updated_workflow.get("steps") or [],
+        "p_decision_rules": updated_workflow.get("decision_rules") or [],
+        "p_approvals": updated_workflow.get("approvals") or [],
+        "p_exceptions": updated_workflow.get("exceptions") or [],
+        "p_sources": updated_workflow.get("sources") or [],
+        "p_source": old_skill.get("source") or "manual",
+        "p_source_metadata": old_skill.get("source_metadata") or {},
+        "p_raw_text": old_skill.get("raw_text") or "",
+        "p_summary_embedding": summary_embedding,
     }).execute()
 
+    new_id = resp.data if isinstance(resp.data, str) else str(resp.data or "")
     updated_workflow["id"] = new_id
     updated_workflow["version"] = new_version
     updated_workflow["previous_version_id"] = str(old_skill["id"])

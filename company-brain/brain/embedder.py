@@ -16,7 +16,6 @@ from datetime import datetime, timezone
 import voyageai
 import voyageai.error
 from dotenv import load_dotenv
-from supabase import Client, create_client
 
 from brain.ingestors import Chunk
 from brain.logger import get_logger
@@ -33,7 +32,6 @@ INITIAL_BACKOFF_SECONDS = 1.0
 
 
 _vc: voyageai.Client | None = None
-_sc: Client | None = None
 
 
 def _voyage_client() -> voyageai.Client:
@@ -43,14 +41,10 @@ def _voyage_client() -> voyageai.Client:
     return _vc
 
 
-def _supabase_client() -> Client:
-    global _sc
-    if _sc is None:
-        _sc = create_client(
-            os.environ["SUPABASE_URL"],
-            os.environ["SUPABASE_SERVICE_KEY"],
-        )
-    return _sc
+def _supabase_client():
+    """Reuse brain.store's singleton (has 30s httpx timeout)."""
+    from brain.store import get_client
+    return get_client()
 
 
 def _embed_with_retry(
@@ -138,9 +132,9 @@ def get_embeddings_batch(
                 try:
                     vectors.append(get_embedding(t))
                 except Exception as exc:
-                    log.error("single-text embed failed, using zero-vector",
+                    log.error("single-text embed failed, skipping chunk",
                               extra={"error": str(exc), "text_len": len(t)})
-                    vectors.append([0.0] * 1024)
+                    vectors.append([])  # empty = skip in embed_and_store_batch
         out.extend(vectors)
         log.info("embedding progress", extra={"done": len(out), "total": total})
 
@@ -200,8 +194,8 @@ def store_chunk(chunk: Chunk, embedding: list[float], org_id: str | None = None)
 
 def embed_and_store_batch(
     chunks: list[Chunk], org_id: str | None = None
-) -> tuple[int, int, list[Chunk]]:
-    """Batch embed + store. Returns (new_count, skipped_count, newly_embedded).
+) -> tuple[int, int, list[Chunk], list[list[float]]]:
+    """Batch embed + store. Returns (new_count, skipped_count, newly_embedded, embeddings).
 
     1. Compute content_hashes for all chunks.
     2. Bulk-check which already exist (1 DB call).
@@ -209,7 +203,7 @@ def embed_and_store_batch(
     4. Upsert new chunks (1 DB call).
     """
     if not chunks:
-        return 0, 0, []
+        return 0, 0, [], []
 
     from brain.store import _default_org_id
 
@@ -237,16 +231,23 @@ def embed_and_store_batch(
     skipped = len(chunks) - len(new_indices)
 
     if not new_indices:
-        return 0, skipped, []
+        return 0, skipped, [], []
 
     # Batch embed — batched Voyage calls instead of N individual ones.
     new_texts = [chunks[i].content for i in new_indices]
     embeddings = get_embeddings_batch(new_texts)
 
-    # Build rows and upsert.
+    # Build rows and upsert — skip chunks whose embedding failed (empty list).
     rows = []
+    valid_embeddings: list[list[float]] = []
+    valid_chunks: list[Chunk] = []
     for idx, emb in zip(new_indices, embeddings):
+        if not emb:
+            skipped += 1
+            continue
         chunk = chunks[idx]
+        valid_embeddings.append(emb)
+        valid_chunks.append(chunk)
         rows.append({
             "source_type": chunk.source_type,
             "source_name": chunk.source_name,
@@ -258,18 +259,18 @@ def embed_and_store_batch(
             "org_id": org,
         })
 
-    try:
-        _supabase_client().table(TABLE).upsert(
-            rows, on_conflict="org_id,content_hash"
-        ).execute()
-    except Exception as exc:
-        raise RuntimeError(f"Supabase batch upsert failed: {exc}") from exc
+    if rows:
+        try:
+            _supabase_client().table(TABLE).upsert(
+                rows, on_conflict="org_id,content_hash"
+            ).execute()
+        except Exception as exc:
+            raise RuntimeError(f"Supabase batch upsert failed: {exc}") from exc
 
-    newly_embedded = [chunks[i] for i in new_indices]
     log.info("batch embed+store", extra={
-        "new": len(new_indices), "skipped": skipped, "org_id": org,
+        "new": len(valid_chunks), "skipped": skipped, "org_id": org,
     })
-    return len(new_indices), skipped, newly_embedded
+    return len(valid_chunks), skipped, valid_chunks, valid_embeddings
 
 
 def embed_and_store(chunk: Chunk, org_id: str | None = None) -> str | None:

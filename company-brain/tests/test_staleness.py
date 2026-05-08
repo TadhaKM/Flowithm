@@ -19,7 +19,7 @@ def test_flags_never_reviewed_old_skill(mock_supabase, monkeypatch):
         mock_supabase.rows_by_table["skills"] = [{
             "id": "s1",
             "process_name": "Refunds",
-            "created_at": _iso(old_dt),
+            "generated_at": _iso(old_dt),
             "reviewed_at": None,
             "needs_review": False,
             "archived": False,
@@ -47,7 +47,7 @@ def test_does_not_flag_new_skill(mock_supabase, monkeypatch):
         mock_supabase.rows_by_table["skills"] = [{
             "id": "s2",
             "process_name": "Onboarding",
-            "created_at": _iso(recent_dt),
+            "generated_at": _iso(recent_dt),
             "reviewed_at": None,
             "needs_review": False,
             "archived": False,
@@ -69,7 +69,7 @@ def test_flags_old_reviewed_skill(mock_supabase, monkeypatch):
         mock_supabase.rows_by_table["skills"] = [{
             "id": "s3",
             "process_name": "Deploys",
-            "created_at": "2025-01-01T00:00:00+00:00",
+            "generated_at": "2025-01-01T00:00:00+00:00",
             "reviewed_at": _iso(old_review),
             "needs_review": False,
             "archived": False,
@@ -90,7 +90,7 @@ def test_clears_flag_after_recent_review(mock_supabase, monkeypatch):
         mock_supabase.rows_by_table["skills"] = [{
             "id": "s4",
             "process_name": "Incident response",
-            "created_at": "2025-01-01T00:00:00+00:00",
+            "generated_at": "2025-01-01T00:00:00+00:00",
             "reviewed_at": _iso(recent_review),
             "needs_review": True,  # was flagged previously, now should clear
             "archived": False,
@@ -112,7 +112,7 @@ def test_threshold_env_var_short(mock_supabase, monkeypatch):
         mock_supabase.rows_by_table["skills"] = [{
             "id": "s5",
             "process_name": "Refunds",
-            "created_at": _iso(two_days_ago),
+            "generated_at": _iso(two_days_ago),
             "reviewed_at": None,
             "needs_review": False,
             "archived": False,
@@ -133,7 +133,7 @@ def test_threshold_env_var_long(mock_supabase, monkeypatch):
         mock_supabase.rows_by_table["skills"] = [{
             "id": "s5b",
             "process_name": "Refunds",
-            "created_at": _iso(two_days_ago),
+            "generated_at": _iso(two_days_ago),
             "reviewed_at": None,
             "needs_review": False,
             "archived": False,

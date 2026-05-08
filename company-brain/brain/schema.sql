@@ -496,37 +496,58 @@ $$;
 
 
 -- ---------------------------------------------------------------------------
--- accept_conflict — transactional drift-accept (B-1)
+-- accept_conflict — transactional drift-accept (B-1, revised)
 -- ---------------------------------------------------------------------------
--- Wraps the 4 writes after save_workflow in a single transaction so a
--- mid-sequence failure can't leave duplicate active skills, version-less
--- successors, or siblings pointing at archived rows.
+-- Archives the old skill FIRST (so the unique-active-name constraint is
+-- satisfied), then INSERTs the new skill, then cascades siblings and marks
+-- the conflict accepted — all in one transaction. Returns the new skill's
+-- UUID so the caller can build its response.
 create or replace function accept_conflict(
-    p_new_skill_id   uuid,
-    p_old_skill_id   uuid,
-    p_conflict_id    uuid,
-    p_new_version    integer,
-    p_resolved_by    text,
-    p_org_id         uuid
-) returns void
+    p_old_skill_id        uuid,
+    p_conflict_id         uuid,
+    p_new_version         integer,
+    p_resolved_by         text,
+    p_org_id              uuid,
+    -- new skill fields
+    p_process_name        text,
+    p_description         text,
+    p_process_trigger     text,
+    p_steps               jsonb,
+    p_decision_rules      jsonb,
+    p_approvals           jsonb,
+    p_exceptions          jsonb,
+    p_sources             jsonb,
+    p_source              text,
+    p_source_metadata     jsonb,
+    p_raw_text            text,
+    p_summary_embedding   vector(1024) default null
+) returns uuid
 language plpgsql
 as $$
+declare
+    v_new_id uuid;
 begin
-    -- 1. Set version + lineage on the freshly-saved skill
-    update skills
-       set version = p_new_version,
-           previous_version_id = p_old_skill_id
-     where id = p_new_skill_id;
-
-    -- 2. Archive the superseded skill
+    -- 1. Archive the old skill FIRST to satisfy the unique-active-name index
     update skills
        set archived = true,
            archived_at = now()
      where id = p_old_skill_id;
 
-    -- 3. Cascade: re-target every OTHER unresolved sibling conflict
+    -- 2. INSERT the new skill with version + lineage already set
+    insert into skills (
+        process_name, description, process_trigger, steps, decision_rules,
+        approvals, exceptions, sources, source, source_metadata, raw_text,
+        version, previous_version_id, org_id, summary_embedding
+    ) values (
+        p_process_name, p_description, p_process_trigger, p_steps,
+        p_decision_rules, p_approvals, p_exceptions, p_sources, p_source,
+        p_source_metadata, p_raw_text, p_new_version, p_old_skill_id,
+        p_org_id, p_summary_embedding
+    ) returning id into v_new_id;
+
+    -- 3. Cascade: re-target unresolved sibling conflicts to the new version
     update conflicts
-       set existing_skill_id = p_new_skill_id
+       set existing_skill_id = v_new_id
      where existing_skill_id = p_old_skill_id
        and status = 'unresolved'
        and org_id = p_org_id
@@ -535,10 +556,12 @@ begin
     -- 4. Mark this conflict accepted
     update conflicts
        set status       = 'accepted',
-           new_skill_id = p_new_skill_id,
+           new_skill_id = v_new_id,
            resolved_by  = p_resolved_by,
            resolved_at  = now()
      where id = p_conflict_id;
+
+    return v_new_id;
 end;
 $$;
 

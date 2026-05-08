@@ -124,6 +124,10 @@ class IngestionScheduler:
             resp = client.rpc("try_acquire_ingest_lock", {"holder": holder}).execute()
             acquired = bool(resp.data)
         except Exception as exc:
+            if os.getenv("INGEST_REQUIRE_LOCK", "").lower() in ("1", "true", "yes"):
+                logger.error("lock RPC failed and INGEST_REQUIRE_LOCK is set — aborting",
+                             extra={"error": str(exc)})
+                return None
             logger.warning("lock RPC unavailable, running unlocked",
                            extra={"error": str(exc)})
             lock_supported = False
@@ -167,6 +171,7 @@ class IngestionScheduler:
 
             for org_id, sources in per_org.items():
                 org_newly_embedded: list = []
+                org_new_embeddings: list[list[float]] = []
                 org_results = {
                     "new_chunks": 0,
                     "skipped_chunks": 0,
@@ -179,12 +184,13 @@ class IngestionScheduler:
                         org_results["sources_checked"] += 1
                         chunks = self._fetch_chunks_for_source(source)
                         # P-1: batch embed+store instead of per-chunk round-trips.
-                        new_count, skip_count, newly = embed_and_store_batch(
+                        new_count, skip_count, newly, new_embs = embed_and_store_batch(
                             chunks, org_id=org_id,
                         )
                         org_results["new_chunks"] += new_count
                         org_results["skipped_chunks"] += skip_count
                         org_newly_embedded.extend(newly)
+                        org_new_embeddings.extend(new_embs)
                         update_source_last_synced(str(source["id"]), _now_utc().isoformat())
                     except NotImplementedError as exc:
                         msg = f"{source['source_type']} source {source['id']}: {exc}"
@@ -209,7 +215,10 @@ class IngestionScheduler:
 
                 if org_newly_embedded:
                     try:
-                        conflicts = check_chunks_against_skills(org_newly_embedded, org_id=org_id)
+                        conflicts = check_chunks_against_skills(
+                            org_newly_embedded, org_id=org_id,
+                            precomputed_embeddings=org_new_embeddings or None,
+                        )
                         org_results["new_conflicts"] = len(conflicts)
                     except Exception as exc:
                         msg = f"check_chunks_against_skills: {exc}"

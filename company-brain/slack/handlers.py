@@ -364,21 +364,38 @@ def _extract_workflow_async(
         "triggered_by": triggered_by,
         "workspace": team_id,
     }
-    try:
-        resp = requests.post(
-            f"{FLOWITHM_API_URL}/workflows/generate",
-            json={
-                "name": process_name,
-                "content": thread_text,
-                "source": "slack",
-                "source_metadata": source_metadata,
-            },
-            headers=_api_headers(),
-            timeout=90,
-        )
-        resp.raise_for_status()
-        workflow = resp.json()
-    except Exception as exc:
+    # M-6: 2-attempt retry with backoff on transient errors.
+    import time as _time
+
+    workflow = None
+    last_exc: Exception | None = None
+    for attempt in range(2):
+        try:
+            resp = requests.post(
+                f"{FLOWITHM_API_URL}/workflows/generate",
+                json={
+                    "name": process_name,
+                    "content": thread_text,
+                    "source": "slack",
+                    "source_metadata": source_metadata,
+                },
+                headers=_api_headers(),
+                timeout=90,
+            )
+            if resp.status_code in (429, 502, 503, 504) and attempt == 0:
+                wait = min(float(resp.headers.get("Retry-After", 3)), 10)
+                _time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            workflow = resp.json()
+            break
+        except Exception as exc:
+            last_exc = exc
+            if attempt == 0:
+                _time.sleep(2)
+
+    if workflow is None:
+        exc = last_exc
         print(f"[extract] /workflows/generate failed: {exc}", flush=True)
         _show_error(
             client, channel_id, message_ts,

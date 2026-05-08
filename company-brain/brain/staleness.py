@@ -56,7 +56,7 @@ def run_staleness_check(org_id: str | None = None) -> dict[str, Any]:
 
     skills = (
         client.table("skills")
-        .select("id,process_name,created_at,reviewed_at,needs_review")
+        .select("id,process_name,generated_at,reviewed_at,needs_review")
         .eq("archived", False)
         .eq("org_id", org)
         .execute()
@@ -70,7 +70,7 @@ def run_staleness_check(org_id: str | None = None) -> dict[str, Any]:
     to_clear: list[str] = []
 
     for skill in skills:
-        created_at = _parse_iso(skill.get("created_at")) or _parse_iso(skill.get("generated_at"))
+        created_at = _parse_iso(skill.get("generated_at"))
         if created_at is None:
             continue
         reviewed_at = _parse_iso(skill.get("reviewed_at"))

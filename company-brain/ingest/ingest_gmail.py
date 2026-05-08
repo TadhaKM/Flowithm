@@ -93,7 +93,11 @@ class GmailIngestor(BaseIngestor):
                 logger.error("Gmail token refresh failed: %s", exc)
                 raise RuntimeError(f"Gmail auth failed — token refresh error: {exc}") from exc
 
-        return build("gmail", "v1", credentials=creds, cache_discovery=False)
+        import httplib2  # type: ignore[import-not-found]
+
+        http = httplib2.Http(timeout=30)
+        return build("gmail", "v1", credentials=creds, cache_discovery=False,
+                      http=creds.authorize(http))
 
     def _persist_refreshed_creds(self, refreshed_json: str) -> None:
         """Write the refreshed credentials_json back to connected_sources.config."""
