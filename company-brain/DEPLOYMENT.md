@@ -50,7 +50,9 @@ up the [`Dockerfile`](Dockerfile) and [`railway.json`](railway.json).
 | `VOYAGE_API_KEY` | Production key from dash.voyageai.com |
 | `SUPABASE_URL` | From your Supabase project's Settings → API |
 | `SUPABASE_SERVICE_KEY` | The **service_role** key, server-only |
-| `ADMIN_TOKEN` | Generate fresh: `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
+| `ADMIN_TOKEN` | Generate fresh: `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Required on every internal endpoint (`/query`, `/skills`, `/workflows/*`, `/history`, `/conflicts`, `/sources`, `/ingest/status`) — the C-4 lockdown made this the canonical org gate. |
+| `BOOTSTRAP_TOKEN` | Required to call `POST /setup` after the first organisation has been created. Without it, the public internet could DoS the DB by minting orgs and farm cookies for the dashboard's admin proxies. |
+| `FLOWITHM_ACTION_SECRET` | Optional. Signing key for Slack interactive-button payloads (HMAC-SHA-256). If unset, falls back to `ADMIN_TOKEN`. Set independently if you ever rotate `ADMIN_TOKEN` without invalidating in-flight Slack messages. |
 | `ORG_ID` | `00000000-0000-0000-0000-000000000001` for single-tenant; the org's UUID for multi-tenant deploys |
 | `FRONTEND_URL` | Your Vercel deployment URL — added to CORS allow-list |
 | `APP_VERSION` | Whatever your CI sets — surfaced by `GET /health` |
@@ -116,6 +118,19 @@ project, set **Root Directory** to `company-brain/ui`.
 > `lib/org.getOrgId`). Before opening the dashboard to untrusted users,
 > add policies that scope every read/write to `current_setting('app.org_id')`
 > and switch to anon + JWT.
+
+> **Dashboard auth is a session cookie + admin token, NOT real user
+> auth.** The Next.js admin proxies inject `ADMIN_TOKEN` server-side, but
+> the only "user identity" is the `flowithm_org_id` httpOnly cookie set
+> by `/setup`. Anyone who hits the dashboard origin and POSTs `/setup`
+> gets a cookie. Until you wire a real auth provider (Supabase Auth /
+> Clerk / NextAuth) **the dashboard MUST be behind a network-layer gate**
+> — Vercel Password Protection, Cloudflare Access, or equivalent. The
+> backend lockdown (C-4) means a leaked dashboard cookie can't trash
+> arbitrary tenants' data without also having `ADMIN_TOKEN`, but a
+> dashboard origin you treat as public would still let visitors mint
+> orgs (gated by `BOOTSTRAP_TOKEN` after the first one) and farm
+> cookies. Treat as single-tenant only until real auth ships.
 
 ---
 

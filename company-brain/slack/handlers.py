@@ -220,9 +220,11 @@ def register(app: App) -> None:
     @app.action("update_existing")
     def on_update_existing(ack, body, client: WebClient):
         ack()
-        try:
-            value = json.loads(body["actions"][0]["value"])
-        except Exception:
+        # H-5: every interactive button value is HMAC-signed by the
+        # formatter; reject anything tampered or unsigned.
+        from slack.sign import verify_action
+        value = verify_action((body.get("actions") or [{}])[0].get("value"))
+        if not isinstance(value, dict):
             return
         threading.Thread(
             target=_show_update_confirmation,
@@ -240,9 +242,9 @@ def register(app: App) -> None:
     @app.action("confirm_update")
     def on_confirm_update(ack, body, client: WebClient):
         ack()
-        try:
-            value = json.loads(body["actions"][0]["value"])
-        except Exception:
+        from slack.sign import verify_action
+        value = verify_action((body.get("actions") or [{}])[0].get("value"))
+        if not isinstance(value, dict):
             return
         threading.Thread(
             target=_perform_update,
@@ -259,7 +261,11 @@ def register(app: App) -> None:
     @app.action("cancel_update")
     def on_cancel_update(ack, body, client: WebClient):
         ack()
-        workflow_id = (body.get("actions") or [{}])[0].get("value") or ""
+        from slack.sign import verify_action
+        value = verify_action((body.get("actions") or [{}])[0].get("value"))
+        if not isinstance(value, dict):
+            return
+        workflow_id = value.get("new_id") or ""
         threading.Thread(
             target=_revert_to_workflow,
             kwargs={

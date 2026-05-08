@@ -176,12 +176,17 @@ def build_workflow_response_blocks(
         "value": workflow_id,
     })
     if existing and existing.get("id") and str(existing.get("id")) != workflow_id:
+        # H-5: sign the value blob so a workspace member can't edit the
+        # button payload to target a workflow they shouldn't be able to
+        # update. The matching verify_action() in handlers.py rejects
+        # any tampered or unsigned value.
+        from slack.sign import sign_action
         elements.append({
             "type": "button",
             "text": {"type": "plain_text", "text": "Update existing"},
             "style": "danger",
             "action_id": "update_existing",
-            "value": json.dumps({
+            "value": sign_action({
                 "new_id": workflow_id,
                 "existing_id": str(existing.get("id")),
                 "existing_name": existing.get("process") or "",
@@ -216,6 +221,9 @@ def build_update_confirmation_blocks(
     new_id: str,
     existing_id: str,
 ) -> list[dict]:
+    # H-5: sign every button value below — same reason as in
+    # build_workflow_response_blocks.
+    from slack.sign import sign_action
     return [
         {
             "type": "section",
@@ -236,13 +244,13 @@ def build_update_confirmation_blocks(
                     "text": {"type": "plain_text", "text": "Confirm update"},
                     "style": "primary",
                     "action_id": "confirm_update",
-                    "value": json.dumps({"new_id": new_id, "existing_id": existing_id}),
+                    "value": sign_action({"new_id": new_id, "existing_id": existing_id}),
                 },
                 {
                     "type": "button",
                     "text": {"type": "plain_text", "text": "Cancel"},
                     "action_id": "cancel_update",
-                    "value": new_id,
+                    "value": sign_action({"new_id": new_id, "kind": "cancel"}),
                 },
             ],
         },

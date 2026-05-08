@@ -227,12 +227,46 @@ def test_update_confirmation_has_confirm_and_cancel():
 
 
 def test_update_confirmation_carries_ids_in_button_value():
+    """Confirm-update button value is HMAC-signed (H-5). The plaintext
+    JSON form was a vector for forged button payloads, so we now verify
+    via slack.sign rather than json.loads."""
+    from slack.sign import verify_action
+
     blocks = build_update_confirmation_blocks("Old name", "new-1", "old-1")
     actions = next(b for b in blocks if b["type"] == "actions")
     confirm = next(el for el in actions["elements"] if el["action_id"] == "confirm_update")
-    payload = json.loads(confirm["value"])
+    payload = verify_action(confirm["value"])
+    assert payload is not None
     assert payload["new_id"] == "new-1"
     assert payload["existing_id"] == "old-1"
+
+
+def test_update_confirmation_value_rejects_tampering():
+    """A modified blob must fail verification. Verify both body- and
+    signature-side tampering plus an entirely unsigned plaintext."""
+    from slack.sign import sign_action, verify_action
+
+    blocks = build_update_confirmation_blocks("Old name", "new-1", "old-1")
+    actions = next(b for b in blocks if b["type"] == "actions")
+    confirm = next(el for el in actions["elements"] if el["action_id"] == "confirm_update")
+
+    body, sig = confirm["value"].split(".", 1)
+
+    # Body for an attacker-supplied payload signed under a wrong key — the
+    # cleanest demonstration of "the body says X but the sig was made for Y".
+    forged = sign_action({"new_id": "victim-id", "existing_id": "another-victim"})
+    forged_body, _ = forged.split(".", 1)
+    assert verify_action(forged_body + "." + sig) is None
+
+    # Wrong signature half.
+    assert verify_action(body + ".aaaaaaaaaaaa") is None
+
+    # Plain-JSON values like the pre-H-5 format should be rejected too.
+    import json as _json
+    assert verify_action(_json.dumps({"new_id": "x", "existing_id": "y"})) is None
+    # Empty / missing.
+    assert verify_action("") is None
+    assert verify_action(None) is None
 
 
 def test_error_blocks_include_message():
