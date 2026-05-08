@@ -429,19 +429,6 @@ function SkillsFilePanel({
 }) {
   const json = workflowToJson(workflow);
   const displayJson = formatDisplayJson(json);
-  const [simulating, setSimulating] = useState(false);
-  const [simulatedSteps, setSimulatedSteps] = useState<WorkflowStep[]>([]);
-
-  async function simulateExecution() {
-    if (simulating) return;
-    setSimulating(true);
-    setSimulatedSteps([]);
-    for (const step of workflow.steps) {
-      await delay(400);
-      setSimulatedSteps((current) => [...current, step]);
-    }
-    setSimulating(false);
-  }
 
   return (
     <article className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 flex flex-col">
@@ -469,28 +456,6 @@ function SkillsFilePanel({
         className="font-mono text-[12.5px] leading-7 bg-zinc-950 border border-zinc-800 rounded-lg p-4 text-zinc-300 overflow-auto max-h-[520px] whitespace-pre-wrap break-words scrollbar-thin"
         dangerouslySetInnerHTML={{ __html: highlightWorkflowJson(displayJson) }}
       />
-
-      <button
-        onClick={simulateExecution}
-        disabled={simulating || workflow.steps.length === 0}
-        className="mt-4 inline-flex items-center justify-center gap-2 bg-zinc-800 hover:bg-zinc-700 disabled:bg-zinc-900 disabled:text-zinc-600 border border-zinc-700 disabled:border-zinc-800 text-zinc-100 text-sm font-medium px-3 py-2.5 rounded-lg transition-colors"
-      >
-        {simulating && <Spinner />}
-        Simulate execution
-      </button>
-
-      {simulatedSteps.length > 0 && (
-        <ol className="mt-3 space-y-2">
-          {simulatedSteps.map((step) => (
-            <li
-              key={step.step}
-              className="text-sm text-zinc-300 bg-zinc-950/60 border border-zinc-800 rounded-lg px-3 py-2 animate-fade-in"
-            >
-              Step {step.step} → {step.action}
-            </li>
-          ))}
-        </ol>
-      )}
 
       {workflow.sources.length > 0 && (
         <p className="mt-4 text-xs text-zinc-500">
@@ -576,9 +541,6 @@ function ConfidenceBadge({ value }: { value: number | string }) {
   );
 }
 
-function delay(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 function relativeTime(iso?: string): string {
   if (!iso) return "";
