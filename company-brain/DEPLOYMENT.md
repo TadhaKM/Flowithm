@@ -1,8 +1,8 @@
 # Deployment checklist
 
 Production target: **Railway** for the FastAPI backend, **Vercel** for
-the Next.js dashboard. Supabase Postgres for storage. Anthropic + Voyage
-for the model providers.
+the Next.js dashboard, **Supabase** for Postgres + Auth. Anthropic +
+Voyage for the model providers.
 
 > [!NOTE]
 > The Slack bot (`slack/app.py`) runs Socket Mode — it doesn't expose a
@@ -11,9 +11,29 @@ for the model providers.
 
 ---
 
-## 1. Supabase — schema + seed
+## 0. Rotate secrets (one-time)
 
-Before the first deploy, open the Supabase SQL editor and run
+The `.env` file was exposed in a prior conversation. **Rotate now** before
+deploying:
+
+| Secret | Where to rotate |
+|--------|----------------|
+| `ANTHROPIC_API_KEY` | console.anthropic.com → API Keys → revoke + mint |
+| `VOYAGE_API_KEY` | dash.voyageai.com → API Keys |
+| `SUPABASE_SERVICE_KEY` | Supabase Dashboard → Settings → API → Reset service_role |
+| `ADMIN_TOKEN` | Generate: `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
+| `BOOTSTRAP_TOKEN` | Same: `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
+| `ENCRYPTION_KEY` | `python -c "import secrets; print(secrets.token_hex(32))"` |
+
+Update `.env` and `ui/.env.local` with the new values **before** step 2.
+
+---
+
+## 1. Supabase — schema + Auth
+
+### Schema
+
+Open the Supabase SQL editor and run
 [`brain/schema.sql`](brain/schema.sql) **end to end**. It's idempotent —
 re-runnable for every subsequent migration.
 
@@ -28,11 +48,15 @@ order  by table_name;
 
 Expected: `api_keys`, `api_requests`, `chunks`, `conflicts`,
 `connected_sources`, `executions`, `ingest_lock`, `ingest_runs`,
-`organisations`, `skills`.
+`organisations`, `skills`, `users`.
 
-The schema also seeds a default organisation with UUID
-`00000000-0000-0000-0000-000000000001`. Self-hosted single-tenant deploys
-keep that as the active org via `ORG_ID` env.
+### Auth
+
+1. Supabase Dashboard → Authentication → Providers → confirm **Email** is enabled.
+2. Authentication → URL Configuration → set **Site URL** to your Vercel deploy URL.
+3. Note down these two values from Settings → API:
+   - **Project URL** → goes into `NEXT_PUBLIC_SUPABASE_URL`
+   - **anon/public key** → goes into `NEXT_PUBLIC_SUPABASE_ANON_KEY`
 
 ---
 
@@ -46,14 +70,14 @@ up the [`Dockerfile`](Dockerfile) and [`railway.json`](railway.json).
 
 | Var | Notes |
 |---|---|
-| `ANTHROPIC_API_KEY` | Production key from console.anthropic.com |
-| `VOYAGE_API_KEY` | Production key from dash.voyageai.com |
-| `SUPABASE_URL` | From your Supabase project's Settings → API |
-| `SUPABASE_SERVICE_KEY` | The **service_role** key, server-only |
-| `ADMIN_TOKEN` | Generate fresh: `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Required on every internal endpoint (`/query`, `/skills`, `/workflows/*`, `/history`, `/conflicts`, `/sources`, `/ingest/status`) — the C-4 lockdown made this the canonical org gate. |
-| `BOOTSTRAP_TOKEN` | Required to call `POST /setup` after the first organisation has been created. Without it, the public internet could DoS the DB by minting orgs and farm cookies for the dashboard's admin proxies. |
-| `FLOWITHM_ACTION_SECRET` | Optional. Signing key for Slack interactive-button payloads (HMAC-SHA-256). If unset, falls back to `ADMIN_TOKEN`. Set independently if you ever rotate `ADMIN_TOKEN` without invalidating in-flight Slack messages. |
-| `ORG_ID` | `00000000-0000-0000-0000-000000000001` for single-tenant; the org's UUID for multi-tenant deploys |
+| `ANTHROPIC_API_KEY` | Production key (freshly rotated) |
+| `VOYAGE_API_KEY` | Production key (freshly rotated) |
+| `SUPABASE_URL` | From Supabase Settings → API |
+| `SUPABASE_SERVICE_KEY` | The **service_role** key (freshly rotated) |
+| `ADMIN_TOKEN` | Freshly generated random string |
+| `BOOTSTRAP_TOKEN` | Freshly generated random string |
+| `ENCRYPTION_KEY` | 64 hex chars for AES-256-GCM (connected_sources.config encryption) |
+| `ORG_ID` | `00000000-0000-0000-0000-000000000001` for single-tenant |
 | `FRONTEND_URL` | Your Vercel deployment URL — added to CORS allow-list |
 | `APP_VERSION` | Whatever your CI sets — surfaced by `GET /health` |
 
@@ -65,9 +89,10 @@ up the [`Dockerfile`](Dockerfile) and [`railway.json`](railway.json).
 | `STALE_THRESHOLD_DAYS` | `90` | Staleness flagging window |
 | `ANTHROPIC_TIMEOUT_SECONDS` | `60` | Per-call timeout |
 | `LOG_LEVEL` | `INFO` | Logger min level |
-| `FLOWITHM_URL` | `http://localhost:3000` | Public dashboard host (used by the Slack bot to build deeplinks) |
-| `FLOWITHM_API_URL` | `http://localhost:8000` | Public API host (used by the Slack bot) |
-| `SLACK_BOT_TOKEN` / `SLACK_SIGNING_SECRET` / `SLACK_APP_TOKEN` | — | Only if you're deploying the Slack bot |
+| `INGEST_REQUIRE_LOCK` | `false` | Set `true` to abort ingest on lock RPC failure |
+| `FLOWITHM_URL` | `http://localhost:3000` | Public dashboard host (Slack bot deeplinks) |
+| `FLOWITHM_API_URL` | `http://localhost:8000` | Public API host (Slack bot) |
+| `SLACK_BOT_TOKEN` / `SLACK_SIGNING_SECRET` / `SLACK_APP_TOKEN` | — | Only if deploying the Slack bot |
 
 ### Deploy
 
@@ -75,10 +100,7 @@ up the [`Dockerfile`](Dockerfile) and [`railway.json`](railway.json).
 2. Settings → set **Root Directory** to `company-brain`.
 3. Settings → Variables → paste the env vars above.
 4. Railway auto-builds via the Dockerfile and starts the service.
-5. The healthcheck at `/health` controls Railway's "deployed" state — it
-   exercises Supabase + Anthropic + Voyage + scheduler. A degraded probe
-   doesn't fail the deploy by default; check the response body to see
-   which dependency is sick.
+5. The healthcheck at `/health` exercises Supabase + Anthropic + Voyage + scheduler.
 
 ---
 
@@ -89,48 +111,29 @@ project, set **Root Directory** to `company-brain/ui`.
 
 ### Required environment variables (Settings → Environment Variables)
 
-| Var | Notes |
-|---|---|
-| `FLOWITHM_API_URL` | Your Railway public URL, e.g. `https://flowithm.railway.app` |
-| `NEXT_PUBLIC_API_URL` | Same value — exposed to the browser via `vercel.json` |
-| `SUPABASE_URL` | Same as backend |
-| `SUPABASE_SERVICE_KEY` | Same as backend; server-only — Next.js only reads this in route handlers, never ships to the client |
-| `ADMIN_TOKEN` | Same string as the backend's |
-| `FLOWITHM_PLAYGROUND_KEY` | Plaintext of a key minted via `POST /api/v1/keys` with `name="Playground"` against the production deployment |
+| Var | Public? | Notes |
+|---|---|---|
+| `NEXT_PUBLIC_SUPABASE_URL` | Yes | From Supabase Settings → API (Project URL) |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Yes | From Supabase Settings → API (anon/public key) |
+| `SUPABASE_URL` | No | Same URL, server-only |
+| `SUPABASE_SERVICE_KEY` | No | Service-role key (server-only) |
+| `ADMIN_TOKEN` | No | Same string as backend — used for admin proxy headers + HMAC signing |
+| `FLOWITHM_API_URL` | No | Your Railway public URL, e.g. `https://flowithm.up.railway.app` |
+| `BOOTSTRAP_TOKEN` | No | Same as backend — used by the signup flow to create orgs |
+| `FLOWITHM_PLAYGROUND_KEY` | No | Minted after deploy (see step 4) |
 
 ### Optional
 
 | Var | Purpose |
 |---|---|
-| `FLOWITHM_DEFAULT_ORG_ID` | Bypasses the `/setup` redirect for single-tenant deploys. Set to `00000000-0000-0000-0000-000000000001` (or whatever org UUID you want all visitors to land on). |
+| `FLOWITHM_DEFAULT_ORG_ID` | Bypasses the signup redirect for single-tenant deploys |
 
 ### Deploy
 
 1. Vercel Dashboard → New Project → import your GitHub repo.
 2. Set **Root Directory** to `company-brain/ui`.
 3. Add the env vars above (Production scope).
-4. Vercel detects Next.js automatically; the [`vercel.json`](ui/vercel.json) is supplemental.
-
-> **Why service_role and not anon + RLS?** RLS policies are deferred —
-> see the TODO at the top of `brain/schema.sql`. Until they land, the
-> Next.js server-only routes use the service_role key and enforce org
-> filtering in application code (`brain/store._default_org_id` →
-> `lib/org.getOrgId`). Before opening the dashboard to untrusted users,
-> add policies that scope every read/write to `current_setting('app.org_id')`
-> and switch to anon + JWT.
-
-> **Dashboard auth is a session cookie + admin token, NOT real user
-> auth.** The Next.js admin proxies inject `ADMIN_TOKEN` server-side, but
-> the only "user identity" is the `flowithm_org_id` httpOnly cookie set
-> by `/setup`. Anyone who hits the dashboard origin and POSTs `/setup`
-> gets a cookie. Until you wire a real auth provider (Supabase Auth /
-> Clerk / NextAuth) **the dashboard MUST be behind a network-layer gate**
-> — Vercel Password Protection, Cloudflare Access, or equivalent. The
-> backend lockdown (C-4) means a leaked dashboard cookie can't trash
-> arbitrary tenants' data without also having `ADMIN_TOKEN`, but a
-> dashboard origin you treat as public would still let visitors mint
-> orgs (gated by `BOOTSTRAP_TOKEN` after the first one) and farm
-> cookies. Treat as single-tenant only until real auth ships.
+4. Vercel detects Next.js automatically.
 
 ---
 
@@ -138,69 +141,46 @@ project, set **Root Directory** to `company-brain/ui`.
 
 Once Railway is up:
 
-```powershell
-$ADMIN_TOKEN = "<your production ADMIN_TOKEN>"
-$body = @{ name = "Playground" } | ConvertTo-Json
-$resp = Invoke-WebRequest -UseBasicParsing -Method Post `
-  -Uri "https://your-railway-url.railway.app/api/v1/keys" `
-  -Headers @{ Authorization = "Bearer $ADMIN_TOKEN"; "content-type" = "application/json" } `
-  -Body $body
-($resp.Content | ConvertFrom-Json).key
+```bash
+ADMIN_TOKEN="<your production ADMIN_TOKEN>"
+curl -X POST https://your-railway-url.up.railway.app/api/v1/keys \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "content-type: application/json" \
+  -d '{"name":"Playground"}'
 ```
 
-Copy the plaintext, paste into Vercel's `FLOWITHM_PLAYGROUND_KEY` env,
-redeploy.
+Copy the `key` from the response, paste into Vercel's
+`FLOWITHM_PLAYGROUND_KEY` env, redeploy.
 
 ---
 
 ## 5. Post-deploy smoke test
 
-Run these against your production URLs (PowerShell + `Invoke-WebRequest`,
-or curl):
-
 ```bash
 # Health probe — should return status:"ok" with every check OK
-curl https://your-railway-url.railway.app/health
+curl https://your-railway-url.up.railway.app/health
 
-# Mint a customer key
-curl -X POST https://your-railway-url.railway.app/api/v1/keys \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "content-type: application/json" \
-  -d '{"name":"Production"}'
-# → save the `key` from the response
-
-# List skills (empty until you generate something)
-curl -H "Authorization: Bearer $KEY" \
-  https://your-railway-url.railway.app/api/v1/skills
-
-# Semantic match
-curl -H "Authorization: Bearer $KEY" \
-  "https://your-railway-url.railway.app/api/v1/skills/match?q=customer+refund"
+# Visit the Vercel URL → should redirect to /signup
+# Create an account → should land on /brain
+# Generate a workflow from the home page
+# Check /brain → workflow appears
 ```
-
-Then visit the Vercel URL → first load redirects to `/setup` (unless
-`FLOWITHM_DEFAULT_ORG_ID` is set) → enter a company name → land on
-`/brain`. Connect a source via `/brain/sources` → Sync now → check the
-Railway logs for `[Flowithm scheduler] cycle done`.
 
 ---
 
 ## 6. Operating notes
 
 - **Workers**: the Dockerfile starts uvicorn with `--workers 1`. The
-  in-memory rate limiter (`api/auth.py`) is per-process; bumping workers
-  multiplies the effective rate limit. Move to Redis before scaling
-  horizontally — TODO comment in the Dockerfile.
+  threadpool is bumped to 200 in the lifespan. The in-memory rate
+  limiter is per-process; bumping workers multiplies the effective
+  rate limit. Move to Redis before scaling horizontally.
 - **Scheduler mutex**: Railway can only run one instance per service for
-  the scheduler to behave correctly without duplicating cycles. If you
-  deploy multiple replicas, the row-mutex (`ingest_lock`) handles the
-  race — only one instance will run the cycle, the rest skip.
-- **Logs**: every line is JSON. Railway → Logs supports filtering on
-  structured fields. Look for `org_id`, `endpoint`, `duration_ms` for
-  per-request slicing.
+  the scheduler to behave correctly. If you deploy multiple replicas,
+  the row-mutex (`ingest_lock`) handles the race.
+- **Logs**: every line is JSON. Filter on `org_id`, `endpoint`,
+  `duration_ms`.
 - **Schema migrations**: re-run `brain/schema.sql` end-to-end whenever
-  you pull new code. Every `ALTER` and `CREATE` is `IF NOT EXISTS`, so
-  it's idempotent.
-- **Rolling back**: `git revert <hash>` + push. Railway/Vercel will
-  rebuild from the new HEAD. Database changes don't roll back
-  automatically — keep a Supabase backup before destructive migrations.
+  you pull new code. Every statement is idempotent.
+- **Auth flow**: Users sign up at `/signup` (Supabase Auth email/password),
+  which creates the auth user + organisation + `users` row. Login at
+  `/login`. All `/brain/*` routes require an authenticated session.
