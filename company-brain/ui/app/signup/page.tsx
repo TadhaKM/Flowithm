@@ -15,6 +15,7 @@ export default function SignupPage() {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
+  const [verificationSent, setVerificationSent] = useState(false);
 
   useEffect(() => {
     supabaseRef.current = createClient();
@@ -46,14 +47,32 @@ export default function SignupPage() {
     setError(null);
 
     try {
-      // 1. Create the Supabase Auth user.
-      const { error: signUpErr } = await supabase.auth.signUp({
+      // Build the callback URL so Supabase embeds company details in the
+      // redirect — we'll use them in /auth/callback to create the org after
+      // the user confirms their email.
+      const params = new URLSearchParams({
+        c: companyName.trim(),
+        ...(displayName.trim() ? { d: displayName.trim() } : {}),
+      });
+      const redirectTo = `${window.location.origin}/auth/callback?${params}`;
+
+      const { data, error: signUpErr } = await supabase.auth.signUp({
         email: email.trim(),
         password,
+        options: { emailRedirectTo: redirectTo },
       });
       if (signUpErr) throw signUpErr;
 
-      // 2. Create the organisation + link the user on the server.
+      if (!data.session) {
+        // Supabase sent a confirmation email. Show a holding message and
+        // wait — org creation happens in /auth/callback after verification.
+        setVerificationSent(true);
+        setPending(false);
+        return;
+      }
+
+      // Email confirmation is disabled — session is live immediately.
+      // Create the organisation now.
       const res = await fetch("/api/auth/signup", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -79,6 +98,39 @@ export default function SignupPage() {
     return (
       <main className="min-h-screen flex items-center justify-center bg-zinc-950">
         <div className="text-sm text-zinc-500">Loading…</div>
+      </main>
+    );
+  }
+
+  if (verificationSent) {
+    return (
+      <main className="min-h-screen flex items-center justify-center bg-zinc-950 px-6">
+        <div className="w-full max-w-md text-center">
+          <Link href="/" className="text-2xl font-medium tracking-tight text-zinc-100">
+            Flowithm
+          </Link>
+          <div className="mt-8 rounded-xl border border-zinc-800 bg-zinc-900/60 p-8">
+            <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-[#1D9E75]/15 text-[#1D9E75] text-xl">
+              ✉
+            </div>
+            <h2 className="text-lg font-medium text-zinc-100">Check your email</h2>
+            <p className="mt-2 text-sm text-zinc-400">
+              We sent a verification link to{" "}
+              <span className="text-zinc-200">{email}</span>.
+              Click the link to activate your account and finish setup.
+            </p>
+            <p className="mt-4 text-xs text-zinc-600">
+              No email? Check your spam folder, or{" "}
+              <button
+                className="text-zinc-400 underline underline-offset-2 hover:text-zinc-200 transition-colors"
+                onClick={() => { setVerificationSent(false); setPending(false); }}
+              >
+                go back
+              </button>{" "}
+              to try again.
+            </p>
+          </div>
+        </div>
       </main>
     );
   }
