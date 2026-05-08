@@ -571,7 +571,7 @@ def get_unresolved_conflicts(
         -_iso_to_epoch(r.get("created_at") or ""),
     ))
 
-    _hydrate_skill_meta(client, rows)
+    _hydrate_skill_meta(client, rows, org=org)
     return rows
 
 
@@ -588,24 +588,27 @@ def get_conflict_history(skill_id: str, org_id: str | None = None) -> list[dict[
         .order("created_at", desc=True)
         .execute()
     )
+    org = org_id or _default_org_id()
     rows = result.data or []
-    _hydrate_skill_meta(client, rows)
+    _hydrate_skill_meta(client, rows, org=org)
     return rows
 
 
-def _hydrate_skill_meta(client, rows: list[dict[str, Any]]) -> None:
+def _hydrate_skill_meta(client, rows: list[dict[str, Any]], org: str | None = None) -> None:
     """Annotate each row with the live process_name/trigger and a
     `targets_archived_version` flag based on the referenced skill's
     archived state. UI uses this to gate the Accept button."""
     skill_ids = list({r["existing_skill_id"] for r in rows if r.get("existing_skill_id")})
     skill_meta: dict[str, dict[str, Any]] = {}
     if skill_ids:
-        sk = (
+        q = (
             client.table(SKILLS_TABLE)
             .select("id,process_name,process_trigger,archived")
             .in_("id", skill_ids)
-            .execute()
         )
+        if org:
+            q = q.eq("org_id", org)
+        sk = q.execute()
         for s in sk.data or []:
             skill_meta[str(s["id"])] = {
                 "process_name": s.get("process_name") or "",

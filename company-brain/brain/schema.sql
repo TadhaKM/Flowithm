@@ -277,6 +277,12 @@ create index if not exists api_requests_key_idx     on api_requests (api_key_id)
 create index if not exists api_requests_created_idx on api_requests (created_at);
 -- C-2: direct org column for defense-in-depth (no JOIN needed to scope).
 alter table api_requests add column if not exists org_id uuid references organisations(id);
+-- M-11: FK so dangling pointers are cleaned up on skill deletion.
+do $$ begin
+    alter table api_requests drop constraint if exists api_requests_matched_skill_id_fkey;
+    alter table api_requests add constraint api_requests_matched_skill_id_fkey
+        foreign key (matched_skill_id) references skills(id) on delete set null;
+end $$;
 
 -- executions: agent feedback when a workflow step runs. exception_note
 -- triggers a drift check (via brain/drift) when Claude judges it as a
@@ -589,10 +595,37 @@ update api_keys          set org_id = '00000000-0000-0000-0000-000000000001'::uu
 update ingest_runs       set org_id = '00000000-0000-0000-0000-000000000001'::uuid where org_id is null;
 update executions        set org_id = '00000000-0000-0000-0000-000000000001'::uuid where org_id is null;
 
+-- L-15: org_id FKs → ON DELETE CASCADE so deleting an org cascades cleanly.
+do $$ begin
+    alter table skills            drop constraint if exists skills_org_id_fkey;
+    alter table skills            add constraint skills_org_id_fkey
+        foreign key (org_id) references organisations(id) on delete cascade;
+    alter table chunks            drop constraint if exists chunks_org_id_fkey;
+    alter table chunks            add constraint chunks_org_id_fkey
+        foreign key (org_id) references organisations(id) on delete cascade;
+    alter table conflicts         drop constraint if exists conflicts_org_id_fkey;
+    alter table conflicts         add constraint conflicts_org_id_fkey
+        foreign key (org_id) references organisations(id) on delete cascade;
+    alter table connected_sources drop constraint if exists connected_sources_org_id_fkey;
+    alter table connected_sources add constraint connected_sources_org_id_fkey
+        foreign key (org_id) references organisations(id) on delete cascade;
+    alter table api_keys          drop constraint if exists api_keys_org_id_fkey;
+    alter table api_keys          add constraint api_keys_org_id_fkey
+        foreign key (org_id) references organisations(id) on delete set null;
+    alter table ingest_runs       drop constraint if exists ingest_runs_org_id_fkey;
+    alter table ingest_runs       add constraint ingest_runs_org_id_fkey
+        foreign key (org_id) references organisations(id) on delete cascade;
+    alter table executions        drop constraint if exists executions_org_id_fkey;
+    alter table executions        add constraint executions_org_id_fkey
+        foreign key (org_id) references organisations(id) on delete cascade;
+end $$;
+
 create index if not exists skills_org_idx            on skills (org_id);
 create index if not exists chunks_org_idx            on chunks (org_id);
 create index if not exists conflicts_org_idx         on conflicts (org_id);
 create index if not exists connected_sources_org_idx on connected_sources (org_id);
+-- M-13: composite for the scheduler's list_active_connected_sources query.
+create index if not exists connected_sources_org_active_idx on connected_sources (org_id, is_active);
 create index if not exists api_keys_org_idx          on api_keys (org_id);
 create index if not exists ingest_runs_org_idx       on ingest_runs (org_id);
 
@@ -602,6 +635,12 @@ create index if not exists conflicts_org_status_created_idx
 create index if not exists skills_org_generated_active_idx
     on skills (org_id, generated_at desc)
     where archived = false;
+
+-- L-14: prevent version chain from forking (two active skills pointing
+-- at the same predecessor).
+create unique index if not exists skills_previous_version_unique_idx
+    on skills (previous_version_id)
+    where previous_version_id is not null and archived = false;
 
 -- RLS enabled with no policies — service role bypasses, anon role gets
 -- nothing. Policies coming pre-launch (see TODO at top of file).

@@ -274,18 +274,9 @@ def embed_and_store_batch(
 
 
 def embed_and_store(chunk: Chunk, org_id: str | None = None) -> str | None:
-    """Convenience wrapper: embed `chunk.content`, store, return uuid.
-
-    Skips Voyage + Supabase entirely if the content is already stored
-    (matched by SHA-256 of chunk.content). Returns None in that case.
-    Note that dedup is GLOBAL on content_hash — two orgs ingesting the
-    same Slack message both surface the same row. Acceptable for now;
-    revisit if cross-org content-leakage becomes a concern.
-    """
-    content_hash = hashlib.sha256(chunk.content.encode("utf-8")).hexdigest()
-    if chunk_exists(content_hash, org_id=org_id):
-        log.info("skipped duplicate chunk", extra={"source_name": chunk.source_name})
-        return None
+    """Embed + upsert one chunk. Returns the row uuid, or the existing row's
+    uuid if the content was already stored (deduped by the composite unique
+    index on (org_id, content_hash) — no separate SELECT needed)."""
     embedding = get_embedding(chunk.content)
     return store_chunk(chunk, embedding, org_id=org_id)
 

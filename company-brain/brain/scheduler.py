@@ -191,7 +191,7 @@ class IngestionScheduler:
                         org_results["skipped_chunks"] += skip_count
                         org_newly_embedded.extend(newly)
                         org_new_embeddings.extend(new_embs)
-                        update_source_last_synced(str(source["id"]), _now_utc().isoformat())
+                        update_source_last_synced(str(source["id"]), _now_utc().isoformat(), org_id=org_id)
                     except NotImplementedError as exc:
                         msg = f"{source['source_type']} source {source['id']}: {exc}"
                         logger.warning(msg, extra={"org_id": org_id, "source_id": source.get("id")})
