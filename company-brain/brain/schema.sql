@@ -96,6 +96,9 @@ create table if not exists chunks (
 -- source_name + metadata + updated_at instead of creating a duplicate row.
 alter table chunks add column if not exists content_hash text;
 alter table chunks add column if not exists updated_at   timestamptz default now();
+-- org_id is also (re-)added below in the multi-tenancy block; we add it here
+-- early so the unique index on (org_id, content_hash) can reference it.
+alter table chunks add column if not exists org_id       uuid references organisations(id);
 -- C-1: the old global index let Org B's upsert overwrite Org A's row if
 -- they ingested the same content. Scope dedup to the tenant.
 drop index if exists chunks_content_hash_idx;
@@ -201,6 +204,10 @@ create index if not exists skills_process_name_trgm_idx
     using gin (process_name gin_trgm_ops);
 
 create index if not exists skills_archived_idx on skills (archived);
+
+-- org_id is also (re-)added below in the multi-tenancy block; we add it here
+-- early so the unique index on (org_id, lower(process_name)) can reference it.
+alter table skills add column if not exists org_id uuid references organisations(id);
 
 -- H-4: backstop constraint — prevents two non-archived skills with the
 -- same process_name in one org (detects accept-path partial failures).
