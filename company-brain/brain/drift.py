@@ -665,6 +665,7 @@ def resolve_conflict(
         client.table(SKILLS_TABLE)
         .select("*")
         .eq("id", conflict["existing_skill_id"])
+        .eq("org_id", org)
         .limit(1)
         .execute()
     )

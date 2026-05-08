@@ -31,6 +31,9 @@ export async function GET(request: Request) {
   const source = url.searchParams.get("source") || "all";
 
   const orgId = await getOrgId();
+  if (!orgId) {
+    return NextResponse.json({ error: "No org context" }, { status: 400 });
+  }
   let query;
   try {
     query = getSupabase()
@@ -39,8 +42,8 @@ export async function GET(request: Request) {
         "id, process_name, process_trigger, steps, decision_rules, approvals, exceptions, sources, source, source_metadata, generated_at, reviewed_at, needs_review, needs_review_reason",
       )
       .eq("archived", false)
+      .eq("org_id", orgId)
       .order("generated_at", { ascending: false });
-    if (orgId) query = query.eq("org_id", orgId);
   } catch (e) {
     return NextResponse.json(
       { error: e instanceof Error ? e.message : "supabase init failed" },

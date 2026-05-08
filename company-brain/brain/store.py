@@ -171,10 +171,15 @@ def save_workflow(
     source_metadata: dict[str, Any] | None = None,
     raw_text: str | None = None,
     org_id: str | None = None,
+    summary_embedding: list[float] | None = None,
 ) -> str:
-    """Persist a generated workflow; return the new row's UUID as a string."""
+    """Persist a generated workflow; return the new row's UUID as a string.
+
+    If summary_embedding is provided, it's written in the same INSERT so
+    the skill is immediately visible to /api/v1/skills/match (H-7).
+    """
     client = get_client()
-    row = {
+    row: dict[str, Any] = {
         "process_name": workflow["process"],
         "description": workflow.get("description") or "",
         "process_trigger": workflow.get("trigger") or "",
@@ -188,6 +193,8 @@ def save_workflow(
         "raw_text": raw_text or "",
         "org_id": org_id or _default_org_id(),
     }
+    if summary_embedding is not None:
+        row["summary_embedding"] = summary_embedding
     result = client.table(SKILLS_TABLE).insert(row).execute()
     inserted = (result.data or [{}])[0]
     return str(inserted.get("id") or "")
@@ -454,17 +461,21 @@ def insert_api_request(
     response_time_ms: int,
     query_text: str | None = None,
     matched_skill_id: str | None = None,
+    org_id: str | None = None,
 ) -> None:
-    """Audit log — no per-org scoping needed (every row references an
-    api_key whose org is recoverable via JOIN)."""
+    """Audit log. org_id is populated directly (C-2 defense-in-depth) so
+    the usage dashboard doesn't need a JOIN to scope by tenant."""
     client = get_client()
-    client.table("api_requests").insert({
+    row: dict[str, Any] = {
         "api_key_id": api_key_id,
         "endpoint": endpoint,
         "query_text": query_text,
         "matched_skill_id": matched_skill_id,
         "response_time_ms": response_time_ms,
-    }).execute()
+    }
+    if org_id:
+        row["org_id"] = org_id
+    client.table("api_requests").insert(row).execute()
 
 
 # ---------------------------------------------------------------------------
@@ -595,9 +606,12 @@ def deactivate_connected_source(source_id: str, org_id: str | None = None) -> bo
     return bool(result.data)
 
 
-def update_source_last_synced(source_id: str, when_iso: str) -> None:
+def update_source_last_synced(source_id: str, when_iso: str, org_id: str | None = None) -> None:
     client = get_client()
-    client.table("connected_sources").update({"last_synced_at": when_iso}).eq("id", source_id).execute()
+    q = client.table("connected_sources").update({"last_synced_at": when_iso}).eq("id", source_id)
+    if org_id:
+        q = q.eq("org_id", org_id)
+    q.execute()
 
 
 def insert_ingest_run(summary: dict[str, Any], org_id: str | None = None) -> str:

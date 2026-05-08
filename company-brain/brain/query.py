@@ -361,6 +361,18 @@ def generate_workflow_from_text(
     text = next((b.text for b in message.content if b.type == "text"), "")
     workflow = json.loads(text)
 
+    # H-7: compute embedding BEFORE insert so a failure doesn't leave
+    # the skill permanently invisible to /api/v1/skills/match.
+    summary_embedding: list[float] | None = None
+    try:
+        from brain.embedder import get_embedding
+
+        summary_text = _build_skill_summary_text(workflow)
+        if summary_text:
+            summary_embedding = get_embedding(summary_text)
+    except Exception as exc:
+        log.error("summary embedding failed", exc_info=True, extra={"error": str(exc)})
+
     workflow_id = ""
     try:
         workflow_id = save_workflow(
@@ -369,22 +381,13 @@ def generate_workflow_from_text(
             source_metadata=source_metadata,
             raw_text=content,
             org_id=org_id,
+            summary_embedding=summary_embedding,
         )
     except Exception as exc:
         log.error("save_workflow failed", exc_info=True, extra={"error": str(exc)})
 
     if workflow_id:
         workflow["id"] = workflow_id
-        try:
-            from brain.embedder import get_embedding
-            from brain.store import update_skill_summary_embedding
-
-            summary_text = _build_skill_summary_text(workflow)
-            if summary_text:
-                vec = get_embedding(summary_text)
-                update_skill_summary_embedding(workflow_id, vec, org_id=org_id)
-        except Exception as exc:
-            log.error("summary embedding failed", exc_info=True, extra={"error": str(exc)})
 
         try:
             from brain.drift import schedule_drift_check

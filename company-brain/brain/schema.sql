@@ -96,7 +96,10 @@ create table if not exists chunks (
 -- source_name + metadata + updated_at instead of creating a duplicate row.
 alter table chunks add column if not exists content_hash text;
 alter table chunks add column if not exists updated_at   timestamptz default now();
-create unique index if not exists chunks_content_hash_idx on chunks (content_hash);
+-- C-1: the old global index let Org B's upsert overwrite Org A's row if
+-- they ingested the same content. Scope dedup to the tenant.
+drop index if exists chunks_content_hash_idx;
+create unique index if not exists chunks_org_content_hash_idx on chunks (org_id, content_hash);
 
 
 -- ---------------------------------------------------------------------------
@@ -199,6 +202,12 @@ create index if not exists skills_process_name_trgm_idx
 
 create index if not exists skills_archived_idx on skills (archived);
 
+-- H-4: backstop constraint — prevents two non-archived skills with the
+-- same process_name in one org (detects accept-path partial failures).
+create unique index if not exists skills_org_process_active_idx
+    on skills (org_id, lower(process_name))
+    where archived = false;
+
 
 -- ---------------------------------------------------------------------------
 -- conflicts (drift detection)
@@ -266,6 +275,8 @@ create table if not exists api_requests (
 );
 create index if not exists api_requests_key_idx     on api_requests (api_key_id);
 create index if not exists api_requests_created_idx on api_requests (created_at);
+-- C-2: direct org column for defense-in-depth (no JOIN needed to scope).
+alter table api_requests add column if not exists org_id uuid references organisations(id);
 
 -- executions: agent feedback when a workflow step runs. exception_note
 -- triggers a drift check (via brain/drift) when Claude judges it as a
@@ -282,6 +293,27 @@ create table if not exists executions (
     created_at       timestamptz not null default now()
 );
 create index if not exists executions_skill_idx on executions (skill_id);
+
+-- H-6: FK cascade fixes — prevents clear_workflows from breaking on
+-- existing conflicts/executions. Idempotent: drop if exists, re-add.
+do $$ begin
+    -- executions.skill_id → ON DELETE CASCADE
+    alter table executions drop constraint if exists executions_skill_id_fkey;
+    alter table executions add constraint executions_skill_id_fkey
+        foreign key (skill_id) references skills(id) on delete cascade;
+    -- conflicts.existing_skill_id → ON DELETE CASCADE
+    alter table conflicts drop constraint if exists conflicts_existing_skill_id_fkey;
+    alter table conflicts add constraint conflicts_existing_skill_id_fkey
+        foreign key (existing_skill_id) references skills(id) on delete cascade;
+    -- conflicts.new_skill_id → ON DELETE SET NULL
+    alter table conflicts drop constraint if exists conflicts_new_skill_id_fkey;
+    alter table conflicts add constraint conflicts_new_skill_id_fkey
+        foreign key (new_skill_id) references skills(id) on delete set null;
+    -- skills.previous_version_id → ON DELETE SET NULL
+    alter table skills drop constraint if exists skills_previous_version_id_fkey;
+    alter table skills add constraint skills_previous_version_id_fkey
+        foreign key (previous_version_id) references skills(id) on delete set null;
+end $$;
 
 
 -- ---------------------------------------------------------------------------
@@ -535,6 +567,13 @@ create index if not exists conflicts_org_idx         on conflicts (org_id);
 create index if not exists connected_sources_org_idx on connected_sources (org_id);
 create index if not exists api_keys_org_idx          on api_keys (org_id);
 create index if not exists ingest_runs_org_idx       on ingest_runs (org_id);
+
+-- M-12: composite indexes for common multi-tenant queries.
+create index if not exists conflicts_org_status_created_idx
+    on conflicts (org_id, status, created_at desc);
+create index if not exists skills_org_generated_active_idx
+    on skills (org_id, generated_at desc)
+    where archived = false;
 
 -- RLS enabled with no policies — service role bypasses, anon role gets
 -- nothing. Policies coming pre-launch (see TODO at top of file).

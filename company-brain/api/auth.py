@@ -78,6 +78,7 @@ def _log_request(
     response_time_ms: int,
     query_text: str | None = None,
     matched_skill_id: str | None = None,
+    org_id: str | None = None,
 ) -> None:
     """Background-task body — never raises."""
     try:
@@ -88,6 +89,7 @@ def _log_request(
             response_time_ms=response_time_ms,
             query_text=query_text,
             matched_skill_id=matched_skill_id,
+            org_id=org_id,
         )
         if response_time_ms > SLOW_REQUEST_THRESHOLD_MS:
             # Never log the verbatim query — it's customer prompt material
@@ -154,6 +156,7 @@ def verify_api_key(
         api_key_id=str(matched["id"]),
         endpoint=request.url.path,
         response_time_ms=int((time.perf_counter() - started) * 1000),
+        org_id=str(matched.get("org_id") or ""),
     )
 
     return {k: v for k, v in matched.items() if k != "key_hash"}

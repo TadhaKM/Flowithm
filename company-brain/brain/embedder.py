@@ -141,16 +141,19 @@ def get_embeddings_batch(
 # Public: storage
 # ---------------------------------------------------------------------------
 
-def chunk_exists(content_hash: str) -> bool:
-    """True iff a chunk with this content_hash is already in Supabase."""
-    result = (
+def chunk_exists(content_hash: str, org_id: str | None = None) -> bool:
+    """True iff a chunk with this content_hash exists for this org."""
+    from brain.store import _default_org_id
+
+    q = (
         _supabase_client()
         .table(TABLE)
         .select("id")
         .eq("content_hash", content_hash)
+        .eq("org_id", org_id or _default_org_id())
         .limit(1)
-        .execute()
     )
+    result = q.execute()
     return len(result.data or []) > 0
 
 
@@ -173,7 +176,7 @@ def store_chunk(chunk: Chunk, embedding: list[float], org_id: str | None = None)
         result = (
             _supabase_client()
             .table(TABLE)
-            .upsert(row, on_conflict="content_hash")
+            .upsert(row, on_conflict="org_id,content_hash")
             .execute()
         )
     except Exception as exc:
@@ -195,7 +198,7 @@ def embed_and_store(chunk: Chunk, org_id: str | None = None) -> str | None:
     revisit if cross-org content-leakage becomes a concern.
     """
     content_hash = hashlib.sha256(chunk.content.encode("utf-8")).hexdigest()
-    if chunk_exists(content_hash):
+    if chunk_exists(content_hash, org_id=org_id):
         log.info("skipped duplicate chunk", extra={"source_name": chunk.source_name})
         return None
     embedding = get_embedding(chunk.content)

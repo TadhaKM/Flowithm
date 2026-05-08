@@ -50,11 +50,14 @@ function rowToWorkflow(r: SkillRow) {
 export async function GET(_request: Request, ctx: RouteContext) {
   const { id } = await ctx.params;
   const orgId = await getOrgId();
+  if (!orgId) {
+    return NextResponse.json({ error: "No org context" }, { status: 400 });
+  }
   let q = getSupabase()
     .from("skills")
     .select("*")
-    .eq("id", id);
-  if (orgId) q = q.eq("org_id", orgId);
+    .eq("id", id)
+    .eq("org_id", orgId);
   const { data, error } = await q.single();
   if (error || !data) {
     return NextResponse.json(
@@ -96,11 +99,14 @@ export async function PATCH(request: Request, ctx: RouteContext) {
   }
 
   const orgId = await getOrgId();
+  if (!orgId) {
+    return NextResponse.json({ error: "No org context" }, { status: 400 });
+  }
   let q2 = getSupabase()
     .from("skills")
     .update(update)
-    .eq("id", id);
-  if (orgId) q2 = q2.eq("org_id", orgId);
+    .eq("id", id)
+    .eq("org_id", orgId);
   const { data, error } = await q2.select().single();
   if (error || !data) {
     return NextResponse.json(
