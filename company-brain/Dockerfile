@@ -30,4 +30,7 @@ EXPOSE 8000
 # TODO: increase --workers when the in-memory rate limiter (api/auth.py)
 # moves to Redis. Right now each worker has its own counter, so N workers
 # = N * 100 req/min effective limit per key.
-CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+#
+# Shell form so $PORT (set by Railway/Heroku/Fly) is expanded at runtime;
+# falls back to 8000 for local `docker run` without the env var set.
+CMD uvicorn api.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1
