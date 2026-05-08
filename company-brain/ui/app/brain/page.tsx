@@ -8,6 +8,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createClient } from "@/lib/supabase-browser";
 
 type WorkflowStep = {
   step: number;
@@ -323,6 +324,14 @@ export default function BrainPage() {
 // --------------------------------------------------------------------------
 
 function BrainHeader() {
+  const router = useRouter();
+
+  async function signOut() {
+    const supabase = createClient();
+    await supabase.auth.signOut();
+    router.push("/login");
+  }
+
   return (
     <header className="mb-12 flex items-center justify-between gap-4">
       <div className="flex items-center gap-6">
@@ -348,9 +357,12 @@ function BrainHeader() {
           Sources
         </Link>
       </div>
-      <p className="text-sm text-zinc-500 hidden sm:block">
-        Every workflow your team has captured
-      </p>
+      <button
+        onClick={signOut}
+        className="text-sm text-zinc-500 hover:text-zinc-300 transition-colors"
+      >
+        Sign out
+      </button>
     </header>
   );
 }

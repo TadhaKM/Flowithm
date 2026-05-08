@@ -1,48 +1,71 @@
-// Redirect to /setup the first time a user lands without a flowithm_org_id
-// cookie. Self-hosted single-tenant deploys can skip this gate by setting
-// FLOWITHM_DEFAULT_ORG_ID in the dashboard's environment — middleware
-// treats that as "we already have an org, no setup needed".
+// Supabase Auth session gate. Refreshes the session token on every
+// request (keeps cookies fresh) and redirects unauthenticated visitors
+// to /login for any protected route.
 //
-// Routes that bypass the redirect:
-//   /setup itself, /api/* (proxy + setup endpoints), /_next/*, favicon
+// Public paths (no session required):
+//   /login, /signup, /api/*, /_next/*, /favicon.ico
+//
+// Everything else — including /brain/*, /setup, /onboarding/*, / — needs
+// a valid Supabase Auth session.
+import { createServerClient } from "@supabase/ssr";
 import { NextRequest, NextResponse } from "next/server";
 
-const HAS_DEFAULT_ORG = !!process.env.FLOWITHM_DEFAULT_ORG_ID;
-const COOKIE = "flowithm_org_id";
-
-export function middleware(req: NextRequest) {
+export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
-  // Bypass: setup page, the post-setup onboarding pages, API routes,
-  // and Next internals. Onboarding pages still require the org cookie
-  // (they're step 2/3 of the flow) — that gate is enforced below by
-  // looking for the cookie on every non-bypassed path.
+  // Bypass: auth pages, API routes, Next internals.
   if (
-    pathname.startsWith("/setup")
-    || pathname.startsWith("/onboarding/")
+    pathname.startsWith("/login")
+    || pathname.startsWith("/signup")
     || pathname.startsWith("/api/")
     || pathname.startsWith("/_next/")
     || pathname === "/favicon.ico"
   ) {
-    // /onboarding/* still needs the org cookie. If absent, fall back
-    // to /setup so the user starts at step 1.
-    if (pathname.startsWith("/onboarding/") && !req.cookies.get(COOKIE) && !HAS_DEFAULT_ORG) {
-      const url = req.nextUrl.clone();
-      url.pathname = "/setup";
-      return NextResponse.redirect(url);
-    }
     return NextResponse.next();
   }
 
-  if (HAS_DEFAULT_ORG) return NextResponse.next();
-  if (req.cookies.get(COOKIE)) return NextResponse.next();
+  // Create a Supabase client that reads/writes session cookies on the
+  // request/response pair. The setAll callback updates both so the
+  // refreshed token propagates to the browser.
+  let response = NextResponse.next({ request: req });
 
-  const url = req.nextUrl.clone();
-  url.pathname = "/setup";
-  return NextResponse.redirect(url);
+  const supabase = createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        getAll() {
+          return req.cookies.getAll();
+        },
+        setAll(cookiesToSet) {
+          cookiesToSet.forEach(({ name, value }) =>
+            req.cookies.set(name, value),
+          );
+          response = NextResponse.next({ request: req });
+          cookiesToSet.forEach(({ name, value, options }) =>
+            response.cookies.set(name, value, options),
+          );
+        },
+      },
+    },
+  );
+
+  // getUser() validates the JWT with the Supabase auth server — never
+  // trust getSession() alone for gate checks since the JWT could be
+  // tampered with client-side.
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) {
+    const url = req.nextUrl.clone();
+    url.pathname = "/login";
+    return NextResponse.redirect(url);
+  }
+
+  return response;
 }
 
-// Don't run on static assets or images — Next handles them anyway.
 export const config = {
   matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
 };

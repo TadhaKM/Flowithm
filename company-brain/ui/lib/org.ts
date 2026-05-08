@@ -1,20 +1,19 @@
-// Shared helper for server-only proxy routes: read the flowithm_org_id
-// cookie + the FLOWITHM_DEFAULT_ORG_ID env fallback, return the headers
-// every proxy needs (auth + org).
+// Shared helper for server-only proxy routes: resolve the authenticated
+// user's organisation from the Supabase Auth session, and build the
+// headers every proxy needs (auth + org).
 //
 // SECURITY: with `admin: true`, this helper REFUSES to fall through to
-// the env default when no cookie is present — admin proxies must have a
+// the env default when no session is present — admin proxies must have a
 // real session-bound org id. Without this guard, anyone who hit the
-// dashboard origin could mint API keys for the default org via the
-// admin endpoints. Public-read paths (GET endpoints already gated on
-// the FastAPI side) can keep using the env fallback by not passing
-// admin:true.
+// dashboard origin could mint API keys for the default org via the admin
+// endpoints.
 //
 // Usage in a route handler:
 //   const headers = await orgHeaders({ admin: true });
 //   const res = await fetch(API + "/sources", { headers, ... });
-import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
+import { createClient as createAuthClient } from "./supabase-server";
+import { getSupabase } from "./supabase";
 
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
 const FALLBACK_ORG_ID = process.env.FLOWITHM_DEFAULT_ORG_ID || "";
@@ -22,33 +21,48 @@ const FALLBACK_ORG_ID = process.env.FLOWITHM_DEFAULT_ORG_ID || "";
 
 export class MissingOrgSession extends Error {
   constructor() {
-    super("No org session — set the flowithm_org_id cookie via /setup first.");
+    super("No authenticated session — sign in at /login first.");
   }
 }
 
 
-export async function getOrgIdFromCookie(): Promise<string> {
-  const c = await cookies();
-  return c.get("flowithm_org_id")?.value || "";
+export async function getOrgIdFromSession(): Promise<string> {
+  const supabase = await createAuthClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return "";
+
+  // Fast path: org_id cached in the user's app_metadata (set at signup).
+  if (user.app_metadata?.org_id) return user.app_metadata.org_id;
+
+  // Slow path: first request after signup before JWT refreshes — fall
+  // back to a direct users-table lookup via the service-role client.
+  const svc = getSupabase();
+  const { data } = await svc
+    .from("users")
+    .select("org_id")
+    .eq("id", user.id)
+    .single();
+
+  return data?.org_id || "";
 }
 
 
 export async function getOrgId(): Promise<string> {
-  const fromCookie = await getOrgIdFromCookie();
-  return fromCookie || FALLBACK_ORG_ID;
+  const fromSession = await getOrgIdFromSession();
+  return fromSession || FALLBACK_ORG_ID;
 }
 
 
 export async function orgHeaders(opts?: { admin?: boolean; json?: boolean }): Promise<HeadersInit> {
   const headers: Record<string, string> = {};
   if (opts?.admin) {
-    // Admin path requires a real cookie-bound session. We refuse the env
+    // Admin path requires a real session-bound org. We refuse the env
     // fallback because every admin proxy hits an endpoint that mutates
     // tenant data, and falling back to FLOWITHM_DEFAULT_ORG_ID would
     // let any unauthenticated visitor target the default org.
-    const cookieOrg = await getOrgIdFromCookie();
-    if (!cookieOrg) throw new MissingOrgSession();
-    headers["X-Org-ID"] = cookieOrg;
+    const sessionOrg = await getOrgIdFromSession();
+    if (!sessionOrg) throw new MissingOrgSession();
+    headers["X-Org-ID"] = sessionOrg;
   } else {
     const org = await getOrgId();
     if (org) headers["X-Org-ID"] = org;
@@ -67,8 +81,8 @@ export function adminTokenMissing(): boolean {
 export function unauthorisedResponse(): NextResponse {
   return NextResponse.json(
     {
-      error: "Not signed in — set up your organisation via /setup first.",
-      code: "MISSING_API_KEY",
+      error: "Not signed in.",
+      code: "MISSING_SESSION",
       docs: "https://flowithm.io/docs",
     },
     { status: 401 },

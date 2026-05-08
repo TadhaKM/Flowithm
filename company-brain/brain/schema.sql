@@ -27,6 +27,24 @@ values ('00000000-0000-0000-0000-000000000001'::uuid, 'Default', 'default', 'fre
 on conflict (id) do nothing;
 
 -- ---------------------------------------------------------------------------
+-- users (Supabase Auth → organisation link)
+-- ---------------------------------------------------------------------------
+-- Maps Supabase Auth users to organisations. The primary key references
+-- auth.users(id) so deleting an auth user cascades here. org_id is the
+-- tenant this user belongs to — used by the dashboard to resolve which
+-- organisation's data to show.
+create table if not exists users (
+    id            uuid          primary key references auth.users(id) on delete cascade,
+    org_id        uuid          not null references organisations(id),
+    display_name  text          not null default '',
+    email         text          not null,
+    created_at    timestamptz   not null default now()
+);
+create index if not exists users_org_idx on users (org_id);
+alter table users enable row level security;
+
+
+-- ---------------------------------------------------------------------------
 -- Extensions
 -- ---------------------------------------------------------------------------
 -- pgvector provides the `vector` type and similarity operators (<->, <=>, <#>).

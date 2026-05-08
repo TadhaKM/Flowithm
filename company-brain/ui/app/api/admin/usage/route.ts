@@ -12,7 +12,7 @@
 // service-role key would return every tenant's queries.
 import { NextResponse } from "next/server";
 
-import { getOrgIdFromCookie, unauthorisedResponse } from "../../../../lib/org";
+import { getOrgIdFromSession, unauthorisedResponse } from "../../../../lib/org";
 import { getSupabase } from "../../../../lib/supabase";
 
 const DAYS_RANGE_STATS = 30;
@@ -51,7 +51,7 @@ function emptyDays(n: number, offsetMin: number): { date: string; count: number 
 }
 
 export async function GET(request: Request) {
-  const orgId = await getOrgIdFromCookie();
+  const orgId = await getOrgIdFromSession();
   if (!orgId) return unauthorisedResponse();
 
   const { searchParams } = new URL(request.url);

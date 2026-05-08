@@ -137,7 +137,9 @@ Brand colour `#1D9E75` (teal); dark theme using zinc neutrals.
 | `/brain/api` | Agent API tab. Keys management (table + two-click revoke + new-key modal showing plaintext once with copy button). 30-day usage stats (cards + 14-day local-time SVG bar chart). Three integration snippets (TS / Python / Claude tool use) with the `needs_review` escalation pattern in each. Live `/skills/match` playground via server-side playground key with syntax-highlighted JSON response. |
 | `/brain/sources` | Connected-sources dashboard. Last-run banner with new-chunks / skipped / conflicts / staleness counts and inline-expandable error logs. Per-source cards (type icon, name, active/paused toggle, last_synced, two-click Remove). + Connect source modal with per-type fields (Slack / Notion / **Gmail** / **Intercom** / GitHub). |
 | `/workflow/[id]` | Slack-bot deeplink target. Read-only two-panel render with Copy JSON. |
-| `/setup` | First-run organisation bootstrap (step 1 of 3). Renders when no `flowithm_org_id` cookie is present (middleware redirects). Submits `{company_name, user_name?}` to `/api/setup` which creates the org and sets the httpOnly cookie. After success, advances to `/onboarding/connect` and stamps `localStorage.flowithm_onboarding_step='connect'`. Single-tenant deploys can skip the gate by setting `FLOWITHM_DEFAULT_ORG_ID`. |
+| `/login` | Email/password sign-in via Supabase Auth. Redirects to `/brain` on success. Already-authenticated users auto-redirect to `/brain`. |
+| `/signup` | Account creation. Collects company name, email, password, optional display name. Two-step: client-side `signUp()` → server-side org creation + user-link via `POST /api/auth/signup`. Redirects to `/brain` on success. |
+| `/setup` | Legacy first-run organisation bootstrap (step 1 of 3). Still functional for self-hosted single-tenant deploys with `FLOWITHM_DEFAULT_ORG_ID`. Multi-tenant deploys use `/signup` instead. |
 | `/onboarding/connect` | Step 2. 2x2 grid of source cards (Slack / Notion / Gmail / Manual paste). Slack/Notion/Gmail expand inline to their config form; on submit, POSTs to `/api/admin/sources` then advances to `/onboarding/generate?source=<type>`. Manual paste skips OAuth and jumps directly to step 3. |
 | `/onboarding/generate` | Step 3. If `?source=manual`, shows a textarea pre-filled with sample material. Otherwise shows three suggested-process chips (per source type) that pre-fill the process_name field, plus a textarea for the user to paste a representative thread/page. On generate success, fires CSS confetti, marks `localStorage.flowithm_onboarding_step='complete'`, and offers View dashboard / Generate another. |
 
@@ -146,9 +148,11 @@ Brand colour `#1D9E75` (teal); dark theme using zinc neutrals.
 The dashboard never embeds the Supabase service key, FastAPI
 `ADMIN_TOKEN`, or playground key in the browser bundle. Every admin call
 goes through a Next.js route that injects the secret AND the
-`flowithm_org_id` cookie value as `X-Org-ID` (via `lib/org.orgHeaders`).
+authenticated user's `org_id` as `X-Org-ID` (via `lib/org.orgHeaders`,
+which resolves the org from the Supabase Auth session → `users` table).
 
-- `/api/setup` — POST → FastAPI `/setup`, sets the org cookie
+- `/api/auth/signup` — POST: verifies Supabase session, creates org via FastAPI `/setup`, inserts `users` row, sets `app_metadata.org_id`
+- `/api/setup` — POST → FastAPI `/setup` (legacy, still functional)
 - `/api/brain` — list workflows (Supabase direct, scoped to org_id)
 - `/api/brain/[id]` — GET / PATCH single workflow (scoped to org_id)
 - `/api/brain/[id]/review` — POST → FastAPI `/skills/{id}/review`
@@ -162,9 +166,11 @@ goes through a Next.js route that injects the secret AND the
 - `/api/admin/ingest` — GET status + POST trigger
 - `/api/admin/workflows/generate` — POST → FastAPI `/workflows/generate` (used by onboarding step 3)
 
-`ui/middleware.ts` redirects every non-API page to `/setup` when no
-`flowithm_org_id` cookie is present (and `FLOWITHM_DEFAULT_ORG_ID` env
-isn't set as a single-tenant escape hatch).
+`ui/middleware.ts` validates the Supabase Auth session on every request
+(via `getUser()`) and redirects unauthenticated visitors to `/login`.
+Public paths bypassed: `/login`, `/signup`, `/api/*`, `/_next/*`,
+`/favicon.ico`. The middleware also refreshes the session token cookie
+on every request to keep it alive.
 
 ---
 
@@ -175,6 +181,7 @@ Postgres on Supabase, with `vector` (pgvector) and `pg_trgm` extensions.
 | Table | Purpose |
 |---|---|
 | `organisations` | Multi-tenancy root. Every domain row references this. Bootstrap seeds a default row at UUID `00000000-0000-0000-0000-000000000001` for self-hosted single-tenant deploys. |
+| `users` | Maps Supabase Auth users to organisations. PK references `auth.users(id)` with cascade delete. Stores `org_id`, `display_name`, `email`. Created during `/signup` flow; `org_id` is also embedded in the auth user's `app_metadata` for fast JWT-based resolution. |
 | `chunks` | One row per embedded text chunk. `embedding vector(1024)` (Voyage `voyage-3`). `content_hash` SHA-256 unique index dedups re-ingested content. `org_id` ties to `organisations`. |
 | `skills` | Generated workflow records. `summary_embedding vector(1024)` powers `/api/v1/skills/match`. `version` + `previous_version_id` track drift accepts. `needs_review` + `needs_review_reason` + `stale_flagged_at` for staleness. `archived` + `archived_at` for soft-delete. `org_id` ties to `organisations`. |
 | `conflicts` | Drift records — contradiction / update / expansion / deprecation. Status: unresolved / accepted / dismissed / snoozed. `resolved_by` + `resolved_at` + `snoozed_until`. `org_id`. |
@@ -310,9 +317,18 @@ proxy times round-trip itself).
 ### `ui/.env.local` (Next.js side)
 
 Must be set independently — Next.js doesn't read the parent `.env`.
-Mirror `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `ADMIN_TOKEN`,
-`FLOWITHM_API_URL`, plus `FLOWITHM_PLAYGROUND_KEY` (a key minted via
-`POST /api/v1/keys` named `Playground`).
+
+| Var | Public? | Purpose |
+|---|---|---|
+| `NEXT_PUBLIC_SUPABASE_URL` | Yes | Supabase project URL (same value as `SUPABASE_URL`). Used by browser + server auth clients. |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Yes | Supabase anon/public key. Safe to expose — RLS policies apply. |
+| `SUPABASE_URL` | No | Server-only Supabase URL for the service-role client. |
+| `SUPABASE_SERVICE_KEY` | No | Service-role key for admin DB access (bypasses RLS). |
+| `ADMIN_TOKEN` | No | Guards admin proxy endpoints. |
+| `BOOTSTRAP_TOKEN` | No | Gates `POST /setup` after first org. Used by `/api/auth/signup`. |
+| `FLOWITHM_API_URL` | No | FastAPI backend URL for server-side proxy routes. |
+| `FLOWITHM_PLAYGROUND_KEY` | No | Minted key for the live API playground. |
+| `FLOWITHM_DEFAULT_ORG_ID` | No | Single-tenant escape hatch — skip auth for org resolution. |
 
 ---
 
@@ -428,6 +444,7 @@ authoritative; full message bodies via `git show <hash>`.
 | `aa3c073` | Security pass 1: gitignore Google tokens (C-2), secure cookie (H-6), `hmac.compare_digest` (H-8), redact `query_text` from slow-request logs (H-1), drop key-prefix from new-key audit (H-2), randomise slug suffix (H-7), enforce Slack signing_secret in non-Socket mode (H-3). |
 | `9ef5031` | Security pass 2: admin gate every org-scoped FastAPI endpoint (C-4), bootstrap-token gate on `/setup` (C-5), lock down `/api/admin/usage` with session + api_keys join (C-6), `MissingOrgSession` on admin proxies (C-3 partial), Slack bot sends admin token (H-4), drift cascade gets defensive `org_id` filter (M-5). Dashboard tests updated; new `unauthed_client` fixture for 401 paths. |
 | `da38d50` | Security pass 3: HMAC-signed Slack action_value blobs (H-5) — `slack/sign.py` packs `<b64body>.<b64sig>`, formatter signs every interactive button payload, handlers reject tampered/unsigned values. |
+| `_______` | Supabase Auth: `users` table, `/login` + `/signup` pages, session middleware, org resolution from auth session, `/api/auth/signup` server route, sign-out in header. Replaces `flowithm_org_id` cookie with real authenticated sessions (C-3). |
 
 ---
 

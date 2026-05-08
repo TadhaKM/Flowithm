@@ -3,7 +3,7 @@
 // dashboard's tenant.
 import { NextResponse } from "next/server";
 
-import { MissingOrgSession, adminTokenMissing, getOrgIdFromCookie, orgHeaders } from "@/lib/org";
+import { MissingOrgSession, adminTokenMissing, getOrgIdFromSession, orgHeaders } from "@/lib/org";
 
 const API_URL = (process.env.FLOWITHM_API_URL || "http://localhost:8000").replace(/\/$/, "");
 
@@ -50,7 +50,7 @@ export async function POST(request: Request) {
   // C-3 hardening: org_id MUST be the cookie's value. We refuse any
   // user-supplied org_id that doesn't match — closes the trivial
   // "submit {org_id: <victim-uuid>}" cross-tenant key minting path.
-  const cookieOrg = await getOrgIdFromCookie();
+  const cookieOrg = await getOrgIdFromSession();
   if (!cookieOrg) return unauthorised();
   if (payload.org_id && payload.org_id !== cookieOrg) {
     return NextResponse.json(

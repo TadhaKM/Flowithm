@@ -18,7 +18,7 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 
 import StepIndicator from "../_components/StepIndicator";
 
@@ -45,7 +45,15 @@ of purchase for all customers, regardless of plan type. The previous
 Annual contracts now follow the same 60-day window — the prior
 "no cash refund mid-term" rule is removed.`;
 
-export default function OnboardingGeneratePage() {
+export default function OnboardingGeneratePageWrapper() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-zinc-950" />}>
+      <OnboardingGeneratePage />
+    </Suspense>
+  );
+}
+
+function OnboardingGeneratePage() {
   const router = useRouter();
   const params = useSearchParams();
   const source = (params.get("source") || "manual") as SourceType;
