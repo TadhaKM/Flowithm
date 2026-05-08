@@ -23,11 +23,21 @@ def client():
 # /health
 # ---------------------------------------------------------------------------
 
-def test_health_returns_status_and_chunk_count(client, monkeypatch):
-    """Health probe always returns a status, the legacy chunks_indexed
-    field for backward-compat, and a per-component checks map. The
-    real Supabase/Anthropic probes get monkeypatched so we test the
-    shape, not the live integrations."""
+def test_health_is_lightweight(client):
+    """/health is the Railway healthcheck — must respond without touching
+    any external dependency. Just status + version."""
+    res = client.get("/health")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "ok"
+    assert "version" in body
+
+
+def test_health_detailed_returns_status_and_chunk_count(client, monkeypatch):
+    """/health/detailed returns a status, the legacy chunks_indexed field
+    for backward-compat, and a per-component checks map. The real
+    Supabase/Anthropic probes get monkeypatched so we test the shape,
+    not the live integrations."""
     monkeypatch.setattr("api.main._cached_chunk_count", lambda: 42)
 
     # Stub the Supabase fetch to a benign success so we don't hit live infra.
@@ -44,7 +54,7 @@ def test_health_returns_status_and_chunk_count(client, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     monkeypatch.setenv("VOYAGE_API_KEY", "voyage-test")
 
-    res = client.get("/health")
+    res = client.get("/health/detailed")
     assert res.status_code == 200
     body = res.json()
     assert body["chunks_indexed"] == 42

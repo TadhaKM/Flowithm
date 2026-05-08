@@ -265,9 +265,9 @@ def test_skills_by_name_not_found_returns_404_with_closest(test_client, mock_sup
 # /health error path
 # ---------------------------------------------------------------------------
 
-def test_health_under_supabase_outage(client, monkeypatch):
-    """Supabase failure in /health should still return 200 with error info,
-    not crash."""
+def test_health_detailed_under_supabase_outage(client, monkeypatch):
+    """Supabase failure in /health/detailed should still return 200 with
+    error info, not crash."""
     monkeypatch.setattr("api.main._cached_chunk_count", lambda: 0)
 
     class _BoomClient:
@@ -276,7 +276,7 @@ def test_health_under_supabase_outage(client, monkeypatch):
     monkeypatch.setattr("brain.store.get_client", lambda: _BoomClient())
     monkeypatch.setattr("brain.store._client", None)
 
-    res = client.get("/health")
+    res = client.get("/health/detailed")
     assert res.status_code == 200
     body = res.json()
     assert "error" in str(body.get("checks", {}).get("supabase", "")).lower()

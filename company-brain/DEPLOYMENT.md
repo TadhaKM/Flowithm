@@ -100,7 +100,9 @@ up the [`Dockerfile`](Dockerfile) and [`railway.json`](railway.json).
 2. Settings → set **Root Directory** to `company-brain`.
 3. Settings → Variables → paste the env vars above.
 4. Railway auto-builds via the Dockerfile and starts the service.
-5. The healthcheck at `/health` exercises Supabase + Anthropic + Voyage + scheduler.
+5. The healthcheck at `/health` is a fast liveness probe (status + version)
+   so Railway's 30s healthcheck window is comfortable. The real dependency
+   probe (Supabase + Anthropic + Voyage + scheduler) lives at `/health/detailed`.
 
 ---
 
@@ -157,8 +159,11 @@ Copy the `key` from the response, paste into Vercel's
 ## 5. Post-deploy smoke test
 
 ```bash
-# Health probe — should return status:"ok" with every check OK
+# Liveness probe — should return {"status":"ok","version":"…"}
 curl https://your-railway-url.up.railway.app/health
+
+# Full dependency probe — Supabase + Anthropic + Voyage + scheduler all OK
+curl https://your-railway-url.up.railway.app/health/detailed
 
 # Visit the Vercel URL → should redirect to /signup
 # Create an account → should land on /brain

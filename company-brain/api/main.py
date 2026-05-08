@@ -10,7 +10,8 @@ Endpoints:
   GET    /history                     — last N generated workflows
   DELETE /history                     — wipe all generated workflows
   GET    /demo/{slug}                 — serve a demo source-material file from /demo-data
-  GET    /health                      — status + indexed chunk count
+  GET    /health                      — fast liveness probe (used by Railway healthcheck)
+  GET    /health/detailed              — full dependency probe (Supabase/Anthropic/Voyage/scheduler)
 """
 # When uvicorn loads this as `main:app` (via run.sh, with /api as the working
 # directory) instead of `api.main:app` from the project root, the `brain.*`
@@ -409,7 +410,19 @@ def get_demo(slug: str) -> str:
 
 
 @app.get("/health")
-def health(request: Request) -> dict:
+def health() -> dict:
+    """Lightweight liveness probe for Railway/Vercel/etc. Must return in
+    well under the platform's healthcheck window — Railway's is 30s — so
+    no external calls here. The detailed dependency probe lives at
+    /health/detailed."""
+    return {
+        "status": "ok",
+        "version": os.environ.get("APP_VERSION", "dev"),
+    }
+
+
+@app.get("/health/detailed")
+def health_detailed(request: Request) -> dict:
     """Real health probe — exercises every external dependency just enough
     to know whether it's reachable, then returns a per-component status
     map. Existing `chunks_indexed` field preserved for backward compat
