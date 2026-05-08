@@ -100,6 +100,51 @@ def test_generate_workflow_malformed_json_raises(mock_supabase, mock_voyage, moc
 
 
 # ---------------------------------------------------------------------------
+# drift.check_chunks_against_skills — basic coverage
+# ---------------------------------------------------------------------------
+
+def test_check_chunks_against_skills_no_skills_returns_empty(mock_supabase, mock_voyage, mock_anthropic):
+    """No skills in the org → returns [] without calling Claude."""
+    from brain.drift import check_chunks_against_skills
+    from brain.ingestors import Chunk
+
+    mock_supabase.rpc_results = {"match_skills": []}
+    chunks = [Chunk(source_type="slack", source_name="test", content="some content", metadata={})]
+    result = check_chunks_against_skills(chunks)
+    assert result == []
+    assert len(mock_anthropic["calls"]) == 0
+
+
+def test_check_chunks_against_skills_with_hit(mock_supabase, mock_voyage, mock_anthropic):
+    """A chunk that matches a skill and Claude flags → conflict inserted."""
+    from brain.drift import check_chunks_against_skills
+    from brain.ingestors import Chunk
+
+    mock_supabase.rpc_results = {"match_skills": [{
+        "id": "s1", "process_name": "Refunds", "similarity": 0.9,
+        "description": "", "process_trigger": "", "steps": [],
+        "decision_rules": [], "approvals": [], "exceptions": [],
+        "sources": [], "source": "manual", "version": 1,
+        "generated_at": "2025-01-01", "needs_review": False,
+        "needs_review_reason": None,
+    }]}
+    mock_anthropic["response_text"] = json.dumps({
+        "is_conflict": True,
+        "conflict_type": "contradiction",
+        "conflict_description": "test conflict",
+        "existing_rule": "old rule",
+        "new_evidence": "new evidence",
+        "suggested_update": "update it",
+        "severity": "high",
+    })
+
+    chunks = [Chunk(source_type="slack", source_name="test", content="conflicting content", metadata={})]
+    result = check_chunks_against_skills(chunks)
+    assert len(result) == 1
+    assert result[0]["conflict_type"] == "contradiction"
+
+
+# ---------------------------------------------------------------------------
 # Multi-tenant isolation (negative tenancy test)
 # ---------------------------------------------------------------------------
 
