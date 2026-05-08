@@ -33,7 +33,7 @@ INITIAL_BACKOFF_SECONDS = 1.0
 
 
 def _voyage_client() -> voyageai.Client:
-    return voyageai.Client(api_key=os.environ["VOYAGE_API_KEY"])
+    return voyageai.Client(api_key=os.environ["VOYAGE_API_KEY"], timeout=30)
 
 
 def _supabase_client() -> Client:
@@ -46,11 +46,11 @@ def _supabase_client() -> Client:
 def _embed_with_retry(
     client: voyageai.Client, texts: list[str], input_type: str
 ) -> list[list[float]]:
-    """Call Voyage with exponential backoff on rate-limit errors.
+    """Call Voyage with exponential backoff on transient errors.
 
-    Voyage 429s arrive as voyageai.error.RateLimitError. Other errors
-    (auth, invalid request, server error) propagate immediately — they're
-    not transient and retrying would just delay the failure.
+    Retries on: RateLimitError (429), ConnectionError, TimeoutError,
+    and server errors (5xx wrapped as generic exceptions). Auth and
+    invalid-request errors propagate immediately.
     """
     backoff = INITIAL_BACKOFF_SECONDS
     last_exc: Exception | None = None
@@ -59,10 +59,28 @@ def _embed_with_retry(
             return client.embed(texts, model=MODEL, input_type=input_type).embeddings
         except voyageai.error.RateLimitError as exc:
             last_exc = exc
-            if attempt == MAX_RETRIES - 1:
-                break
-            time.sleep(backoff)
-            backoff *= 2
+            # Honor Retry-After header if present
+            retry_after = getattr(exc, "retry_after", None)
+            wait = float(retry_after) if retry_after else backoff
+        except (ConnectionError, TimeoutError, OSError) as exc:
+            last_exc = exc
+            wait = backoff
+        except Exception as exc:
+            # Catch server-side 5xx that the SDK may wrap generically
+            err_str = str(exc).lower()
+            if "500" in err_str or "502" in err_str or "503" in err_str or "504" in err_str:
+                last_exc = exc
+                wait = backoff
+            else:
+                raise
+        else:
+            break  # unreachable, but for clarity
+        if attempt == MAX_RETRIES - 1:
+            break
+        log.warning("Voyage transient error, retrying",
+                    extra={"attempt": attempt + 1, "wait": wait, "error": str(last_exc)})
+        time.sleep(wait)
+        backoff *= 2
     raise RuntimeError(f"Voyage embedding failed after {MAX_RETRIES} retries") from last_exc
 
 
@@ -103,8 +121,16 @@ def get_embeddings_batch(
             vectors = _embed_with_retry(client, batch, input_type="document")
         except RuntimeError:
             # Batch failed — retry each text individually so one bad text
-            # doesn't sink the whole batch.
-            vectors = [get_embedding(t) for t in batch]
+            # doesn't sink the whole batch. M-17: per-text try/except
+            # appends a zero-vector on failure instead of aborting.
+            vectors = []
+            for t in batch:
+                try:
+                    vectors.append(get_embedding(t))
+                except Exception as exc:
+                    log.error("single-text embed failed, using zero-vector",
+                              extra={"error": str(exc), "text_len": len(t)})
+                    vectors.append([0.0] * 1024)
         out.extend(vectors)
         log.info("embedding progress", extra={"done": len(out), "total": total})
 

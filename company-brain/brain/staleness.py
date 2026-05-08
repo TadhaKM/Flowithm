@@ -64,9 +64,13 @@ def run_staleness_check(org_id: str | None = None) -> dict[str, Any]:
         or []
     )
 
+    # H-12: collect IDs first, then batch-update in two calls instead of N+1.
+    to_flag: list[str] = []
+    to_flag_reasons: dict[str, str] = {}
+    to_clear: list[str] = []
+
     for skill in skills:
         created_at = _parse_iso(skill.get("created_at")) or _parse_iso(skill.get("generated_at"))
-        # Some early rows may have only generated_at, not created_at.
         if created_at is None:
             continue
         reviewed_at = _parse_iso(skill.get("reviewed_at"))
@@ -84,25 +88,32 @@ def run_staleness_check(org_id: str | None = None) -> dict[str, Any]:
             reason = f"Last reviewed {days_since} days ago"
 
         if should_flag and not currently_flagged:
-            client.table("skills").update({
-                "needs_review": True,
-                "needs_review_reason": reason,
-                "stale_flagged_at": _now_utc().isoformat(),
-            }).eq("id", skill["id"]).execute()
-            flagged += 1
-            # Note: `process` is a reserved attribute on LogRecord (it's
-            # the OS pid), so we use `process_name` here — the JSON
-            # formatter will surface it under "extra".
-            logger.info("flagged stale skill", extra={
-                "process_name": skill.get("process_name"), "reason": reason,
-            })
+            to_flag.append(str(skill["id"]))
+            to_flag_reasons[str(skill["id"])] = reason or ""
         elif (not should_flag) and currently_flagged:
-            client.table("skills").update({
-                "needs_review": False,
-                "needs_review_reason": None,
-                "stale_flagged_at": None,
-            }).eq("id", skill["id"]).execute()
-            cleared += 1
+            to_clear.append(str(skill["id"]))
+
+    if to_flag:
+        # Batch flag — a single reason per batch is slightly less specific
+        # than per-row, but the individual reasons are logged below.
+        client.table("skills").update({
+            "needs_review": True,
+            "needs_review_reason": "Hasn't been reviewed recently",
+            "stale_flagged_at": _now_utc().isoformat(),
+        }).in_("id", to_flag).execute()
+        flagged = len(to_flag)
+        for sid in to_flag:
+            logger.info("flagged stale skill", extra={
+                "skill_id": sid, "reason": to_flag_reasons.get(sid),
+            })
+
+    if to_clear:
+        client.table("skills").update({
+            "needs_review": False,
+            "needs_review_reason": None,
+            "stale_flagged_at": None,
+        }).in_("id", to_clear).execute()
+        cleared = len(to_clear)
 
     summary = {
         "skills_checked": len(skills),

@@ -127,6 +127,13 @@ class IntercomIngestor(BaseIngestor):
                 json=payload,
                 timeout=20,
             )
+            if resp.status_code == 429:
+                import time as _time
+                wait = min(float(resp.headers.get("Retry-After", 5)), 30)
+                _time.sleep(wait)
+                continue
+            if resp.status_code in (401, 403):
+                raise RuntimeError(f"Intercom auth failed ({resp.status_code}) — token may be revoked")
             resp.raise_for_status()
             data = resp.json()
 

@@ -156,9 +156,20 @@ class NotionIngestor(BaseIngestor):
 
     @staticmethod
     def _get_json(session, url: str, params: dict | None = None) -> dict:
-        resp = session.get(url, params=params or {}, timeout=15)
+        import time as _time
+
+        for attempt in range(3):
+            resp = session.get(url, params=params or {}, timeout=15)
+            if resp.status_code == 429:
+                wait = min(float(resp.headers.get("Retry-After", 2)), 30)
+                _time.sleep(wait)
+                continue
+            if resp.status_code in (401, 403):
+                raise RuntimeError(f"Notion auth failed ({resp.status_code}) — token may be revoked")
+            resp.raise_for_status()
+            return resp.json()
         resp.raise_for_status()
-        return resp.json()
+        return resp.json()  # unreachable, but satisfies the type checker
 
     def _fetch_block_children(self, session, block_id: str) -> list[dict]:
         out: list[dict] = []

@@ -33,12 +33,16 @@ class GmailIngestor(BaseIngestor):
         label_filters: list[str] | None = None,
         since: datetime | None = None,
         min_thread_length: int = 2,
+        source_id: str | None = None,
+        org_id: str | None = None,
     ) -> None:
         self.credentials_json = credentials_json
         self.label_filters = label_filters or []
         self.since = since
         self.min_thread_length = max(1, int(min_thread_length))
         self._service: Any = None  # built on first fetch
+        self._source_id = source_id
+        self._org_id = org_id
 
     def build_chunks(self, raw_data: Any = None) -> list[Chunk]:
         if not self.credentials_json or not self.label_filters:
@@ -70,14 +74,43 @@ class GmailIngestor(BaseIngestor):
     def _build_service(self):
         # Lazy imports so the module is importable without google-* installed.
         from google.oauth2.credentials import Credentials  # type: ignore[import-not-found]
+        from google.auth.transport.requests import Request  # type: ignore[import-not-found]
         from googleapiclient.discovery import build  # type: ignore[import-not-found]
 
         import json
         creds_dict = json.loads(self.credentials_json or "{}")
         creds = Credentials.from_authorized_user_info(creds_dict)
-        # cache_discovery=False suppresses the noisy oauth2client warning
-        # the discovery layer emits on Python 3.11+.
+
+        # B-3: refresh expired tokens and persist back so the next cycle
+        # has a valid access_token (and a potentially-rotated refresh_token).
+        if creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+                refreshed_json = creds.to_json()
+                self._persist_refreshed_creds(refreshed_json)
+                logger.info("Gmail token refreshed")
+            except Exception as exc:
+                logger.error("Gmail token refresh failed: %s", exc)
+                raise RuntimeError(f"Gmail auth failed — token refresh error: {exc}") from exc
+
         return build("gmail", "v1", credentials=creds, cache_discovery=False)
+
+    def _persist_refreshed_creds(self, refreshed_json: str) -> None:
+        """Write the refreshed credentials_json back to connected_sources.config."""
+        if not self._source_id:
+            return
+        try:
+            import json as _json
+            from brain.store import get_connected_source, update_connected_source
+
+            existing = get_connected_source(self._source_id, org_id=self._org_id)
+            if not existing:
+                return
+            cfg = existing.get("config") or {}
+            cfg["credentials_json"] = refreshed_json
+            update_connected_source(self._source_id, {"config": cfg}, org_id=self._org_id)
+        except Exception as exc:
+            logger.warning("Failed to persist refreshed Gmail creds: %s", exc)
 
     # ------------------------------------------------------------------
     # Fetch

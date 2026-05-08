@@ -111,7 +111,7 @@ def _extract_bearer(authorization: str | None) -> str:
     return parts[1].strip()
 
 
-async def verify_api_key(
+def verify_api_key(
     request: Request,
     background: BackgroundTasks,
 ) -> dict[str, Any]:

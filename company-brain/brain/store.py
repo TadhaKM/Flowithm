@@ -35,10 +35,24 @@ def _default_org_id() -> str:
     return os.environ.get("ORG_ID", DEFAULT_ORG_ID)
 
 
+_client: Client | None = None
+
+
 def get_client() -> Client:
-    url = os.environ["SUPABASE_URL"]
-    key = os.environ["SUPABASE_SERVICE_KEY"]
-    return create_client(url, key)
+    """Return a module-level singleton Supabase client with a 30s timeout.
+
+    Avoids creating a fresh httpx session on every call (H-10). Timeout
+    prevents a stuck Supabase call from hanging the worker forever.
+    """
+    global _client
+    if _client is None:
+        import httpx
+
+        url = os.environ["SUPABASE_URL"]
+        key = os.environ["SUPABASE_SERVICE_KEY"]
+        _client = create_client(url, key)
+        _client.postgrest.session.timeout = httpx.Timeout(30.0)
+    return _client
 
 
 # ---------------------------------------------------------------------------
@@ -599,6 +613,7 @@ def insert_ingest_run(summary: dict[str, Any], org_id: str | None = None) -> str
         "stale_flagged":    int(summary.get("stale_flagged", 0)),
         "stale_cleared":    int(summary.get("stale_cleared", 0)),
         "errors":           summary.get("errors") or [],
+        "errored":          bool(summary.get("errored")),
         "org_id":           org_id or _default_org_id(),
     }
     result = client.table("ingest_runs").insert(payload).execute()

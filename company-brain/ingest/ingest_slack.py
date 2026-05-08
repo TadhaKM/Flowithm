@@ -107,37 +107,43 @@ class SlackIngestor(BaseIngestor):
         client = WebClient(token=self.token)
         oldest = f"{self.since.timestamp()}" if self.since else "0"
 
+        import logging
+
+        logger = logging.getLogger("flowithm.ingest_slack")
         all_messages: list[dict] = []
         for channel_id in self.channel_ids:
-            channel_name = self._resolve_channel_name(client, channel_id)
-            cursor: str | None = None
-            while True:
-                try:
+            # H-7: catch per-channel so one bad channel doesn't abort the rest.
+            try:
+                channel_name = self._resolve_channel_name(client, channel_id)
+                cursor: str | None = None
+                while True:
                     resp = client.conversations_history(
                         channel=channel_id,
                         oldest=oldest,
                         limit=200,
                         cursor=cursor,
                     )
-                except SlackApiError as exc:
-                    raise RuntimeError(
-                        f"conversations.history failed for {channel_id}: {exc.response.get('error')}"
-                    ) from exc
+                    for raw in resp.get("messages", []) or []:
+                        if raw.get("subtype") in {"channel_join", "channel_leave", "bot_message"}:
+                            continue
+                        all_messages.append(_normalise(raw, channel_name))
+                        if raw.get("reply_count") and raw.get("thread_ts") == raw.get("ts"):
+                            all_messages.extend(self._fetch_thread(client, channel_id, channel_name, raw["ts"]))
 
-                for raw in resp.get("messages", []) or []:
-                    if raw.get("subtype") in {"channel_join", "channel_leave", "bot_message"}:
-                        continue
-                    all_messages.append(_normalise(raw, channel_name))
-                    # If the parent has replies, pull them too. We only call
-                    # conversations.replies for threads — saves API budget.
-                    if raw.get("reply_count") and raw.get("thread_ts") == raw.get("ts"):
-                        all_messages.extend(self._fetch_thread(client, channel_id, channel_name, raw["ts"]))
-
-                cursor = (resp.get("response_metadata") or {}).get("next_cursor")
-                if not cursor:
-                    break
-                # Be polite — Slack tier-2 limit is ~20 req/min for history.
-                time.sleep(0.5)
+                    cursor = (resp.get("response_metadata") or {}).get("next_cursor")
+                    if not cursor:
+                        break
+                    time.sleep(0.5)
+            except SlackApiError as exc:
+                error_code = exc.response.get("error", "unknown") if exc.response else "unknown"
+                if error_code in ("invalid_auth", "token_revoked", "account_inactive"):
+                    raise  # H-11: propagate auth failures to deactivate the source
+                retry_after = exc.response.headers.get("Retry-After") if exc.response else None
+                if retry_after:
+                    time.sleep(min(float(retry_after), 30))
+                logger.error("Slack channel %s failed, skipping: %s", channel_id, error_code)
+            except Exception as exc:
+                logger.error("Slack channel %s unexpected error: %s", channel_id, exc)
         return all_messages
 
     @staticmethod

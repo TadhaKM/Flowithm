@@ -37,7 +37,7 @@ class IngestionScheduler:
             job_defaults={
                 "coalesce": True,
                 "max_instances": 1,
-                "misfire_grace_time": 300,
+                "misfire_grace_time": 3600,
             }
         )
         self.last_run_summary: dict[str, Any] | None = None
@@ -141,134 +141,140 @@ class IngestionScheduler:
             "sources_checked": 0,
             "errors": [],
         }
-        # Collect chunks that actually got embedded this cycle so we can run
-        # the chunk-vs-skill drift pass once at the end (single LLM batch
-        # instead of per-source — saves Claude calls and surfaces conflicts
-        # across the whole sync at once).
         newly_embedded: list = []
         logger.info("ingest cycle start", extra={"started_at": started_at.isoformat()})
 
+        # B-4: entire cycle body is in try/finally so the lock is always
+        # released, even if grouping or per-org logic throws.
         try:
-            all_sources = list_active_connected_sources()  # cross-org
-        except Exception as exc:
-            err = f"failed to load connected_sources: {exc}"
-            logger.error(err, exc_info=True)
-            results["errors"].append(err)
-            all_sources = []
+            try:
+                all_sources = list_active_connected_sources()  # cross-org
+            except Exception as exc:
+                err = f"failed to load connected_sources: {exc}"
+                logger.error(err, exc_info=True)
+                results["errors"].append(err)
+                all_sources = []
 
-        # Group by org_id. Sources without an org_id (shouldn't happen after
-        # the schema backfill, but defensive) get bucketed under the default.
-        from brain.store import _default_org_id
+            from brain.store import _default_org_id
 
-        per_org: dict[str, list[dict[str, Any]]] = {}
-        for s in all_sources:
-            key = str(s.get("org_id") or _default_org_id())
-            per_org.setdefault(key, []).append(s)
+            per_org: dict[str, list[dict[str, Any]]] = {}
+            for s in all_sources:
+                key = str(s.get("org_id") or _default_org_id())
+                per_org.setdefault(key, []).append(s)
 
-        # If no orgs have sources, still run a staleness pass for the
-        # default org so reviewed_at expiry isn't blocked.
-        if not per_org:
-            per_org[_default_org_id()] = []
+            if not per_org:
+                per_org[_default_org_id()] = []
 
-        for org_id, sources in per_org.items():
-            org_newly_embedded: list = []
-            org_results = {
-                "new_chunks": 0,
-                "skipped_chunks": 0,
-                "new_conflicts": 0,
-                "sources_checked": 0,
-                "errors": [],
-            }
-            for source in sources:
+            for org_id, sources in per_org.items():
+                org_newly_embedded: list = []
+                org_results = {
+                    "new_chunks": 0,
+                    "skipped_chunks": 0,
+                    "new_conflicts": 0,
+                    "sources_checked": 0,
+                    "errors": [],
+                }
+                for source in sources:
+                    try:
+                        org_results["sources_checked"] += 1
+                        chunks = self._fetch_chunks_for_source(source)
+                        for chunk in chunks:
+                            stored_id = embed_and_store(chunk, org_id=org_id)
+                            if stored_id is None:
+                                org_results["skipped_chunks"] += 1
+                            else:
+                                org_results["new_chunks"] += 1
+                                org_newly_embedded.append(chunk)
+                        update_source_last_synced(str(source["id"]), _now_utc().isoformat())
+                    except NotImplementedError as exc:
+                        msg = f"{source['source_type']} source {source['id']}: {exc}"
+                        logger.warning(msg, extra={"org_id": org_id, "source_id": source.get("id")})
+                        org_results["errors"].append(msg)
+                    except Exception as exc:
+                        msg = f"{source['source_type']} source {source['id']}: {exc}"
+                        logger.exception(msg, extra={"org_id": org_id, "source_id": source.get("id")})
+                        org_results["errors"].append(msg)
+                        # H-11: auth failures → deactivate so we stop producing
+                        # silent zero-row ingests. Surface as "needs reconnect".
+                        err_str = str(exc).lower()
+                        if any(k in err_str for k in ("auth failed", "token_revoked", "invalid_auth", "401", "403")):
+                            try:
+                                from brain.store import deactivate_connected_source
+                                deactivate_connected_source(str(source["id"]), org_id=org_id)
+                                org_results["errors"].append(
+                                    f"{source['source_type']} source {source['id']}: deactivated — needs reconnect"
+                                )
+                            except Exception:
+                                pass
+
+                if org_newly_embedded:
+                    try:
+                        conflicts = check_chunks_against_skills(org_newly_embedded, org_id=org_id)
+                        org_results["new_conflicts"] = len(conflicts)
+                    except Exception as exc:
+                        msg = f"check_chunks_against_skills: {exc}"
+                        logger.error(msg, exc_info=True, extra={"org_id": org_id})
+                        org_results["errors"].append(msg)
+
+                org_stale_flagged = 0
+                org_stale_cleared = 0
                 try:
-                    org_results["sources_checked"] += 1
-                    chunks = self._fetch_chunks_for_source(source)
-                    for chunk in chunks:
-                        stored_id = embed_and_store(chunk, org_id=org_id)
-                        if stored_id is None:
-                            org_results["skipped_chunks"] += 1
-                        else:
-                            org_results["new_chunks"] += 1
-                            org_newly_embedded.append(chunk)
-                    update_source_last_synced(str(source["id"]), _now_utc().isoformat())
-                except NotImplementedError as exc:
-                    msg = f"{source['source_type']} source {source['id']}: {exc}"
-                    logger.warning(msg, extra={"org_id": org_id, "source_id": source.get("id")})
-                    org_results["errors"].append(msg)
-                except Exception as exc:
-                    msg = f"{source['source_type']} source {source['id']}: {exc}"
-                    logger.exception(msg, extra={"org_id": org_id, "source_id": source.get("id")})
-                    org_results["errors"].append(msg)
+                    from brain.staleness import run_staleness_check
 
-            # Drift on this org's newly-embedded chunks.
-            if org_newly_embedded:
-                try:
-                    conflicts = check_chunks_against_skills(org_newly_embedded, org_id=org_id)
-                    org_results["new_conflicts"] = len(conflicts)
+                    stale = run_staleness_check(org_id=org_id)
+                    org_stale_flagged = stale.get("newly_flagged", 0)
+                    org_stale_cleared = stale.get("flags_cleared", 0)
                 except Exception as exc:
-                    msg = f"check_chunks_against_skills: {exc}"
+                    msg = f"run_staleness_check: {exc}"
                     logger.error(msg, exc_info=True, extra={"org_id": org_id})
                     org_results["errors"].append(msg)
 
-            # Staleness pass per-org.
-            org_stale_flagged = 0
-            org_stale_cleared = 0
-            try:
-                from brain.staleness import run_staleness_check
+                try:
+                    insert_ingest_run({
+                        **org_results,
+                        "stale_flagged": org_stale_flagged,
+                        "stale_cleared": org_stale_cleared,
+                        "errored": bool(org_results["errors"]),
+                        "started_at": started_at.isoformat(),
+                        "duration_seconds": max(0, int((_now_utc() - started_at).total_seconds())),
+                    }, org_id=org_id)
+                except Exception as exc:
+                    logger.error("ingest_runs insert failed",
+                                 exc_info=True, extra={"org_id": org_id})
 
-                stale = run_staleness_check(org_id=org_id)
-                org_stale_flagged = stale.get("newly_flagged", 0)
-                org_stale_cleared = stale.get("flags_cleared", 0)
-            except Exception as exc:
-                msg = f"run_staleness_check: {exc}"
-                logger.error(msg, exc_info=True, extra={"org_id": org_id})
-                org_results["errors"].append(msg)
+                results["sources_checked"] += org_results["sources_checked"]
+                results["new_chunks"]      += org_results["new_chunks"]
+                results["skipped_chunks"]  += org_results["skipped_chunks"]
+                results["new_conflicts"]   += org_results["new_conflicts"]
+                results["errors"].extend(f"[{org_id}] {e}" for e in org_results["errors"])
+                newly_embedded.extend(org_newly_embedded)
 
-            # Per-org ingest_runs row.
-            try:
-                insert_ingest_run({
-                    **org_results,
-                    "stale_flagged": org_stale_flagged,
-                    "stale_cleared": org_stale_cleared,
-                    "started_at": started_at.isoformat(),
-                    "duration_seconds": max(0, int((_now_utc() - started_at).total_seconds())),
-                }, org_id=org_id)
-            except Exception as exc:
-                logger.error("ingest_runs insert failed",
-                             exc_info=True, extra={"org_id": org_id})
+            duration_seconds = max(0, int((_now_utc() - started_at).total_seconds()))
+            summary = {
+                **results,
+                "started_at": started_at.isoformat(),
+                "duration_seconds": duration_seconds,
+            }
+            self.last_run_summary = summary
 
-            # Aggregate into the cross-org summary kept in memory for /ingest/status.
-            results["sources_checked"] += org_results["sources_checked"]
-            results["new_chunks"]      += org_results["new_chunks"]
-            results["skipped_chunks"]  += org_results["skipped_chunks"]
-            results["new_conflicts"]   += org_results["new_conflicts"]
-            results["errors"].extend(f"[{org_id}] {e}" for e in org_results["errors"])
-            newly_embedded.extend(org_newly_embedded)
+            logger.info("ingest cycle complete", extra={
+                "new_chunks": results["new_chunks"],
+                "skipped_chunks": results["skipped_chunks"],
+                "new_conflicts": results["new_conflicts"],
+                "errors": len(results["errors"]),
+                "duration_ms": duration_seconds * 1000,
+            })
+            return summary
 
-        duration_seconds = max(0, int((_now_utc() - started_at).total_seconds()))
-        summary = {
-            **results,
-            "started_at": started_at.isoformat(),
-            "duration_seconds": duration_seconds,
-        }
-        self.last_run_summary = summary
-
-        # Release the mutex. Best-effort — the 15-minute timeout on the
-        # acquire side reclaims a stuck lock anyway.
-        if lock_supported:
-            try:
-                client.rpc("release_ingest_lock").execute()
-            except Exception as exc:
-                logger.warning("release_ingest_lock failed", extra={"error": str(exc)})
-
-        logger.info("ingest cycle complete", extra={
-            "new_chunks": results["new_chunks"],
-            "skipped_chunks": results["skipped_chunks"],
-            "new_conflicts": results["new_conflicts"],
-            "errors": len(results["errors"]),
-            "duration_ms": duration_seconds * 1000,
-        })
-        return summary
+        finally:
+            # B-4 + B-5: always release the lock with the holder predicate
+            # so a stale-reclaimed lock isn't wiped by a late finisher.
+            if lock_supported:
+                try:
+                    client.rpc("release_ingest_lock", {"holder": holder}).execute()
+                except Exception as exc:
+                    logger.warning("release_ingest_lock failed",
+                                   extra={"error": str(exc)})
 
     @staticmethod
     def _fetch_chunks_for_source(source: dict[str, Any]) -> list:
@@ -305,6 +311,8 @@ class IngestionScheduler:
                 label_filters=cfg.get("label_filters") or [],
                 since=since_dt,
                 min_thread_length=int(cfg.get("min_thread_length", 2)),
+                source_id=str(source.get("id") or ""),
+                org_id=str(source.get("org_id") or ""),
             ).process(None)
 
         if stype == "intercom":

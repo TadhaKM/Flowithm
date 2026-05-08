@@ -690,34 +690,17 @@ def resolve_conflict(
         org_id=org,
     )
     new_version = int(old_skill.get("version") or 1) + 1
-    client.table(SKILLS_TABLE).update({
-        "version": new_version,
-        "previous_version_id": old_skill["id"],
-    }).eq("id", new_id).execute()
 
-    client.table(SKILLS_TABLE).update({
-        "archived": True,
-        "archived_at": _now_iso(),
-    }).eq("id", old_skill["id"]).execute()
-
-    # Cascade: re-target every OTHER unresolved conflict that pointed at
-    # the now-archived skill onto the freshly-saved new version, so they
-    # stay actionable. The just-accepted conflict still has
-    # status='unresolved' at this point, so the explicit neq("id", ...)
-    # keeps it untouched (we mark it 'accepted' immediately below).
-    # M-5: org_id scoped as defense-in-depth. The conflict was already
-    # org-validated by the fetch above, but if a UUID v4 collision ever
-    # occurred this prevents the cascade from reaching across tenants.
-    client.table(CONFLICTS_TABLE).update({
-        "existing_skill_id": new_id,
-    }).eq("existing_skill_id", old_skill["id"]).eq("status", "unresolved").eq("org_id", org).neq("id", conflict_id).execute()
-
-    client.table(CONFLICTS_TABLE).update({
-        "status": "accepted",
-        "new_skill_id": new_id,
-        "resolved_by": resolved_by,
-        "resolved_at": _now_iso(),
-    }).eq("id", conflict_id).execute()
+    # B-1: wrap the 4 follow-up writes in a single Postgres transaction
+    # via RPC so a mid-sequence failure can't corrupt the skill graph.
+    client.rpc("accept_conflict", {
+        "p_new_skill_id": new_id,
+        "p_old_skill_id": str(old_skill["id"]),
+        "p_conflict_id": conflict_id,
+        "p_new_version": new_version,
+        "p_resolved_by": resolved_by,
+        "p_org_id": org,
+    }).execute()
 
     updated_workflow["id"] = new_id
     updated_workflow["version"] = new_version

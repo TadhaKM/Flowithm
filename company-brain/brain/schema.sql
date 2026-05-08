@@ -326,6 +326,8 @@ create index if not exists ingest_runs_started_idx on ingest_runs (started_at de
 -- which the scheduler calls at the end of every ingest cycle.
 alter table ingest_runs add column if not exists stale_flagged integer not null default 0;
 alter table ingest_runs add column if not exists stale_cleared integer not null default 0;
+-- M-15: true when errors[] is non-empty, surfaced by /health.last_ingest.
+alter table ingest_runs add column if not exists errored boolean not null default false;
 
 
 -- ---------------------------------------------------------------------------
@@ -363,10 +365,13 @@ begin
 end;
 $$;
 
-create or replace function release_ingest_lock() returns void
+-- B-5: holder-predicated release — prevents a late-finishing original
+-- holder from wiping a new holder's lock after a stale-reclaim.
+create or replace function release_ingest_lock(holder text) returns void
 language sql
 as $$
-    update ingest_lock set locked_at = null, locked_by = null where id = 1;
+    update ingest_lock set locked_at = null, locked_by = null
+    where id = 1 and locked_by = holder;
 $$;
 
 
@@ -450,6 +455,54 @@ as $$
       and (target_org_id is null or s.org_id = target_org_id)
     order by s.summary_embedding <=> query_embedding
     limit match_count;
+$$;
+
+
+-- ---------------------------------------------------------------------------
+-- accept_conflict — transactional drift-accept (B-1)
+-- ---------------------------------------------------------------------------
+-- Wraps the 4 writes after save_workflow in a single transaction so a
+-- mid-sequence failure can't leave duplicate active skills, version-less
+-- successors, or siblings pointing at archived rows.
+create or replace function accept_conflict(
+    p_new_skill_id   uuid,
+    p_old_skill_id   uuid,
+    p_conflict_id    uuid,
+    p_new_version    integer,
+    p_resolved_by    text,
+    p_org_id         uuid
+) returns void
+language plpgsql
+as $$
+begin
+    -- 1. Set version + lineage on the freshly-saved skill
+    update skills
+       set version = p_new_version,
+           previous_version_id = p_old_skill_id
+     where id = p_new_skill_id;
+
+    -- 2. Archive the superseded skill
+    update skills
+       set archived = true,
+           archived_at = now()
+     where id = p_old_skill_id;
+
+    -- 3. Cascade: re-target every OTHER unresolved sibling conflict
+    update conflicts
+       set existing_skill_id = p_new_skill_id
+     where existing_skill_id = p_old_skill_id
+       and status = 'unresolved'
+       and org_id = p_org_id
+       and id != p_conflict_id;
+
+    -- 4. Mark this conflict accepted
+    update conflicts
+       set status       = 'accepted',
+           new_skill_id = p_new_skill_id,
+           resolved_by  = p_resolved_by,
+           resolved_at  = now()
+     where id = p_conflict_id;
+end;
 $$;
 
 
