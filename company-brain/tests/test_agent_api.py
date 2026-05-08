@@ -106,7 +106,9 @@ def test_invalid_key_returns_401(test_client, mock_supabase):
 
 
 def test_revoked_key_returns_401(test_client, mock_supabase, valid_api_key):
-    """Bearer matches but is_active=False → 401."""
+    """Bearer matches but is_active=False → 401. Pre-filtered by the DB
+    query (P-14) so the response is INVALID_API_KEY, not REVOKED — no
+    information leakage about key existence."""
     row = _seed_active_key(mock_supabase, valid_api_key)
     row["is_active"] = False
     res = test_client.get(
@@ -114,7 +116,7 @@ def test_revoked_key_returns_401(test_client, mock_supabase, valid_api_key):
         headers={"Authorization": f"Bearer {valid_api_key}"},
     )
     assert res.status_code == 401
-    assert res.json().get("code") == "REVOKED_API_KEY"
+    assert res.json().get("code") == "INVALID_API_KEY"
 
 
 def test_match_no_skills_returns_404(test_client, mock_supabase, mock_voyage, valid_api_key):

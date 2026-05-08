@@ -27,7 +27,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -370,7 +370,11 @@ def archive_workflow_endpoint(workflow_id: str, org_id: str = _OrgDep, _admin=_A
 
 
 @app.get("/history")
-def history(limit: int = 5, org_id: str = _OrgDep, _admin=_AdminDep) -> list[dict]:
+def history(
+    limit: int = Query(5, ge=1, le=200),
+    org_id: str = _OrgDep,
+    _admin=_AdminDep,
+) -> list[dict]:
     return list_workflows(limit=limit, org_id=org_id)
 
 
@@ -524,9 +528,15 @@ def setup(req: SetupRequest, request: Request) -> dict:
 # ---------------------------------------------------------------------------
 
 @app.get("/conflicts")
-def conflicts(include_snoozed: bool = False, org_id: str = _OrgDep, _admin=_AdminDep) -> list[dict]:
+def conflicts(
+    include_snoozed: bool = False,
+    limit: int = Query(50, ge=1, le=200),
+    org_id: str = _OrgDep,
+    _admin=_AdminDep,
+) -> list[dict]:
     """Unresolved drift conflicts. Pass ?include_snoozed=true to also list snoozed ones."""
-    return get_unresolved_conflicts(include_snoozed=include_snoozed, org_id=org_id)
+    rows = get_unresolved_conflicts(include_snoozed=include_snoozed, org_id=org_id)
+    return rows[:limit]
 
 
 @app.post("/conflicts/{conflict_id}/resolve")

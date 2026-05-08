@@ -32,15 +32,25 @@ MAX_RETRIES = 3
 INITIAL_BACKOFF_SECONDS = 1.0
 
 
+_vc: voyageai.Client | None = None
+_sc: Client | None = None
+
+
 def _voyage_client() -> voyageai.Client:
-    return voyageai.Client(api_key=os.environ["VOYAGE_API_KEY"], timeout=30)
+    global _vc
+    if _vc is None:
+        _vc = voyageai.Client(api_key=os.environ["VOYAGE_API_KEY"], timeout=30)
+    return _vc
 
 
 def _supabase_client() -> Client:
-    return create_client(
-        os.environ["SUPABASE_URL"],
-        os.environ["SUPABASE_SERVICE_KEY"],
-    )
+    global _sc
+    if _sc is None:
+        _sc = create_client(
+            os.environ["SUPABASE_URL"],
+            os.environ["SUPABASE_SERVICE_KEY"],
+        )
+    return _sc
 
 
 def _embed_with_retry(
@@ -186,6 +196,80 @@ def store_chunk(chunk: Chunk, embedding: list[float], org_id: str | None = None)
     if not rows:
         raise RuntimeError("Supabase upsert returned no row")
     return str(rows[0].get("id") or "")
+
+
+def embed_and_store_batch(
+    chunks: list[Chunk], org_id: str | None = None
+) -> tuple[int, int, list[Chunk]]:
+    """Batch embed + store. Returns (new_count, skipped_count, newly_embedded).
+
+    1. Compute content_hashes for all chunks.
+    2. Bulk-check which already exist (1 DB call).
+    3. Embed all new chunks in batch (batched Voyage calls).
+    4. Upsert new chunks (1 DB call).
+    """
+    if not chunks:
+        return 0, 0, []
+
+    from brain.store import _default_org_id
+
+    org = org_id or _default_org_id()
+    hashes = [
+        hashlib.sha256(c.content.encode("utf-8")).hexdigest() for c in chunks
+    ]
+
+    # Bulk dedup — one DB round-trip instead of N.
+    existing: set[str] = set()
+    # PostgREST .in_() has a practical URL-length limit; batch in groups.
+    for i in range(0, len(hashes), 500):
+        batch_hashes = hashes[i : i + 500]
+        resp = (
+            _supabase_client()
+            .table(TABLE)
+            .select("content_hash")
+            .eq("org_id", org)
+            .in_("content_hash", batch_hashes)
+            .execute()
+        )
+        existing.update(r["content_hash"] for r in (resp.data or []))
+
+    new_indices = [i for i, h in enumerate(hashes) if h not in existing]
+    skipped = len(chunks) - len(new_indices)
+
+    if not new_indices:
+        return 0, skipped, []
+
+    # Batch embed — batched Voyage calls instead of N individual ones.
+    new_texts = [chunks[i].content for i in new_indices]
+    embeddings = get_embeddings_batch(new_texts)
+
+    # Build rows and upsert.
+    rows = []
+    for idx, emb in zip(new_indices, embeddings):
+        chunk = chunks[idx]
+        rows.append({
+            "source_type": chunk.source_type,
+            "source_name": chunk.source_name,
+            "content": chunk.content,
+            "metadata": chunk.metadata or {},
+            "embedding": emb,
+            "content_hash": hashes[idx],
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "org_id": org,
+        })
+
+    try:
+        _supabase_client().table(TABLE).upsert(
+            rows, on_conflict="org_id,content_hash"
+        ).execute()
+    except Exception as exc:
+        raise RuntimeError(f"Supabase batch upsert failed: {exc}") from exc
+
+    newly_embedded = [chunks[i] for i in new_indices]
+    log.info("batch embed+store", extra={
+        "new": len(new_indices), "skipped": skipped, "org_id": org,
+    })
+    return len(new_indices), skipped, newly_embedded
 
 
 def embed_and_store(chunk: Chunk, org_id: str | None = None) -> str | None:

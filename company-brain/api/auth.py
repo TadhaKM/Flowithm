@@ -70,6 +70,11 @@ def _check_rate_limit(key_id: str) -> None:
             err.headers = {"Retry-After": str(retry_after)}
             raise err
         bucket.append(now)
+        # P-4: periodically evict empty buckets for churned keys.
+        if len(_rate_buckets) > 10_000:
+            stale = [k for k, v in _rate_buckets.items() if not v]
+            for k in stale:
+                del _rate_buckets[k]
 
 
 def _log_request(

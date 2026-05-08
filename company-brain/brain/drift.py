@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import math
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -32,7 +33,7 @@ import anthropic
 from dotenv import load_dotenv
 
 from brain.anthropic_client import messages_create
-from brain.embedder import get_embedding, get_embeddings_batch
+from brain.embedder import get_embedding
 from brain.logger import get_logger
 from brain.store import get_client, save_workflow
 
@@ -45,6 +46,15 @@ SKILLS_TABLE = "skills"
 CONFLICTS_TABLE = "conflicts"
 CANDIDATES_LIMIT = 20
 SNOOZE_DAYS = 7
+_DRIFT_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="drift-claude")
+_anthropic: anthropic.Anthropic | None = None
+
+
+def _get_anthropic() -> anthropic.Anthropic:
+    global _anthropic
+    if _anthropic is None:
+        _anthropic = anthropic.Anthropic()
+    return _anthropic
 
 DRIFT_SYSTEM_PROMPT = (
     "You are a knowledge consistency checker. You compare new company "
@@ -164,24 +174,23 @@ def _skill_summary(skill: dict[str, Any]) -> str:
     return "\n".join(p for p in parts if p)
 
 
-def _rank_candidates(new_content: str, skills: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
-    """Top-N skills by cosine similarity of new_content vs skill summary embeddings.
+def _rank_candidates_via_rpc(
+    new_content: str, org_id: str, limit: int
+) -> list[dict[str, Any]]:
+    """Top-N skills by pgvector cosine similarity via the match_skills RPC.
 
-    Embeds skills on-the-fly via Voyage (no schema change). Acceptable while
-    skill counts are dozens; if the corpus grows past ~hundreds, persist
-    skill embeddings on the skills table and search with pgvector instead.
+    P-2: replaces the old approach that re-embedded every skill on every
+    workflow generation. One Voyage call (embed new_content) + one Postgres
+    ANN query (match_skills) regardless of skill count.
     """
-    if len(skills) <= limit:
-        return skills
-    summaries = [_skill_summary(s) for s in skills]
-    skill_vecs = get_embeddings_batch(summaries)
     query_vec = get_embedding(new_content)
-    scored = sorted(
-        zip(skills, (_cosine(query_vec, v) for v in skill_vecs)),
-        key=lambda kv: kv[1],
-        reverse=True,
-    )
-    return [s for s, _ in scored[:limit]]
+    client = get_client()
+    resp = client.rpc("match_skills", {
+        "query_embedding": query_vec,
+        "match_count": limit,
+        "target_org_id": org_id,
+    }).execute()
+    return resp.data or []
 
 
 def _strip_for_llm(skill: dict[str, Any]) -> dict[str, Any]:
@@ -219,21 +228,16 @@ def check_for_drift(
         client = get_client()
         new_skill_id = new_skill.get("id")
 
-        result = (
-            client.table(SKILLS_TABLE)
-            .select("*")
-            .eq("archived", False)
-            .eq("org_id", org)
-            .execute()
-        )
-        skills_rows = [r for r in (result.data or []) if str(r.get("id")) != str(new_skill_id or "")]
-        if not skills_rows:
+        # P-2: use match_skills RPC (pgvector ANN) instead of loading
+        # every skill + re-embedding them all via Voyage.
+        candidates = _rank_candidates_via_rpc(new_content, org, CANDIDATES_LIMIT)
+        candidates = [c for c in candidates if str(c.get("id")) != str(new_skill_id or "")]
+        if not candidates:
             return []
 
-        candidates = _rank_candidates(new_content, skills_rows, CANDIDATES_LIMIT)
         existing_subset = [_strip_for_llm(s) for s in candidates]
 
-        anthropic_client = anthropic.Anthropic()
+        anthropic_client = _get_anthropic()
         user_message = (
             "New process just extracted:\n"
             f"{json.dumps(new_skill, indent=2, ensure_ascii=False, default=str)}\n\n"
@@ -368,62 +372,65 @@ def check_chunks_against_skills(chunks: list, org_id: str | None = None) -> list
 
         org = org_id or _default_org_id()
         client = get_client()
-        sk_resp = (
-            client.table(SKILLS_TABLE)
-            .select("id,process_name,description,process_trigger,steps,decision_rules,approvals,exceptions,sources,summary_embedding")
-            .eq("archived", False)
-            .eq("org_id", org)
-            .not_.is_("summary_embedding", "null")
-            .execute()
-        )
-        skills = sk_resp.data or []
-        if not skills:
-            return []
 
         chunk_texts = [_chunk_content(c)[:CHUNK_DRIFT_PREVIEW_CHARS] for c in chunks]
-        # Skip chunks that ended up empty after preview-cap.
         usable = [(i, t) for i, t in enumerate(chunk_texts) if t.strip()]
         if not usable:
             return []
-        idx_map = [i for i, _ in usable]
-        chunk_vecs = get_embeddings_batch([t for _, t in usable])
 
-        anthropic_client = anthropic.Anthropic()
+        # P-3: use match_skills RPC per chunk (pgvector ANN) instead of
+        # loading ALL skills into Python and doing cosine in a loop.
+        # Then run the per-(chunk, skill) Claude calls concurrently.
+        anthropic_client = _get_anthropic()
+
+        # Build list of (chunk_index, chunk_text, skill_dict) work items.
+        work_items: list[tuple[int, str, dict[str, Any]]] = []
+        for i_chunk, text in usable:
+            vec = get_embedding(text)
+            resp = client.rpc("match_skills", {
+                "query_embedding": vec,
+                "match_count": CHUNK_TOP_K_CANDIDATES,
+                "target_org_id": org,
+            }).execute()
+            for skill in (resp.data or []):
+                sim = skill.get("similarity", 0)
+                if sim >= CHUNK_MIN_SKILL_SIMILARITY:
+                    work_items.append((i_chunk, text, skill))
+
+        if not work_items:
+            return []
+
+        # P-3: run Claude calls concurrently via thread pool.
+        def _check_one(item: tuple[int, str, dict[str, Any]]) -> dict[str, Any] | None:
+            i_chunk, chunk_text, skill = item
+            hit = _check_chunk_against_skill(anthropic_client, chunk_text, skill)
+            if not hit:
+                return None
+            return {
+                "existing_skill_id": str(skill["id"]),
+                "new_skill_id": None,
+                "existing_process_name": skill.get("process_name") or "",
+                "conflict_type": hit.get("conflict_type") or "contradiction",
+                "conflict_description": hit.get("conflict_description") or "",
+                "existing_rule": hit.get("existing_rule") or "",
+                "new_evidence": hit.get("new_evidence") or _chunk_content(chunks[i_chunk])[:240],
+                "suggested_update": hit.get("suggested_update") or "",
+                "severity": hit.get("severity") or "medium",
+                "org_id": org,
+            }
+
         inserted: list[dict[str, Any]] = []
-
-        for i_chunk, vec in zip(idx_map, chunk_vecs):
-            chunk = chunks[i_chunk]
-            scored = sorted(
-                ((s, _cosine(vec, s["summary_embedding"])) for s in skills),
-                key=lambda kv: kv[1],
-                reverse=True,
-            )
-            top = [(s, sim) for s, sim in scored[:CHUNK_TOP_K_CANDIDATES] if sim >= CHUNK_MIN_SKILL_SIMILARITY]
-            if not top:
+        futures = [_DRIFT_POOL.submit(_check_one, item) for item in work_items]
+        for future in as_completed(futures):
+            row = future.result()
+            if row is None:
                 continue
-
-            for skill, _sim in top:
-                hit = _check_chunk_against_skill(anthropic_client, _chunk_content(chunk), skill)
-                if not hit:
-                    continue
-                row = {
-                    "existing_skill_id": str(skill["id"]),
-                    "new_skill_id": None,
-                    "existing_process_name": skill.get("process_name") or "",
-                    "conflict_type": hit.get("conflict_type") or "contradiction",
-                    "conflict_description": hit.get("conflict_description") or "",
-                    "existing_rule": hit.get("existing_rule") or "",
-                    "new_evidence": hit.get("new_evidence") or _chunk_content(chunk)[:240],
-                    "suggested_update": hit.get("suggested_update") or "",
-                    "severity": hit.get("severity") or "medium",
-                    "org_id": org,
-                }
-                try:
-                    ins = client.table(CONFLICTS_TABLE).insert(row).execute()
-                    inserted.extend(ins.data or [])
-                except Exception as exc:
-                    log.error("conflict insert failed", exc_info=True,
-                              extra={"error": str(exc), "org_id": org})
+            try:
+                ins = client.table(CONFLICTS_TABLE).insert(row).execute()
+                inserted.extend(ins.data or [])
+            except Exception as exc:
+                log.error("conflict insert failed", exc_info=True,
+                          extra={"error": str(exc), "org_id": org})
 
         if inserted:
             log.info("chunk-vs-skill conflicts recorded",
@@ -734,9 +741,8 @@ def _apply_update_via_claude(old_skill: dict[str, Any], suggested_update: str) -
         f"Update instruction:\n{suggested_update}\n\n"
         "Return the full updated workflow JSON, preserving fields not mentioned in the instruction."
     )
-    client = anthropic.Anthropic()
     message = messages_create(
-        client,
+        _get_anthropic(),
         model=MODEL,
         max_tokens=4096,
         system=[{"type": "text", "text": APPLY_UPDATE_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],

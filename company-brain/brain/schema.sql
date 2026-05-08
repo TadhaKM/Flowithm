@@ -462,10 +462,14 @@ returns table (
     needs_review_reason text,
     similarity          float
 )
-language sql
+language plpgsql
 stable
 as $$
-    select
+begin
+    -- P-6: bump probes from default 1 → 10 so IVFFlat scans ~10% of
+    -- centroids instead of ~1%. Recall jumps from ~60% to ~95% at 100K rows.
+    set local ivfflat.probes = 10;
+    return query select
         s.id,
         s.process_name,
         s.description,
@@ -487,6 +491,7 @@ as $$
       and (target_org_id is null or s.org_id = target_org_id)
     order by s.summary_embedding <=> query_embedding
     limit match_count;
+end;
 $$;
 
 
@@ -638,10 +643,12 @@ returns table (
     metadata    jsonb,
     similarity  float
 )
-language sql
+language plpgsql
 stable
 as $$
-    select
+begin
+    set local ivfflat.probes = 10;
+    return query select
         c.id,
         c.source_type,
         c.source_name,
@@ -653,6 +660,7 @@ as $$
       and (target_org_id is null or c.org_id = target_org_id)
     order by c.embedding <=> query_embedding
     limit match_count;
+end;
 $$;
 
 

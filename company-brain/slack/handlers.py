@@ -12,10 +12,12 @@ work in a daemon thread. We never block the Slack event loop.
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any
 
@@ -38,6 +40,11 @@ from slack.formatter import (
 # ---------------------------------------------------------------------------
 FLOWITHM_URL = os.environ.get("FLOWITHM_URL", "http://localhost:3000").rstrip("/")
 FLOWITHM_API_URL = os.environ.get("FLOWITHM_API_URL", "http://localhost:8000").rstrip("/")
+
+# P-5: bounded thread pool instead of unbounded threading.Thread spawns.
+_SLACK_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="flowithm-slack")
+# P-16: module-level user name cache shared across concurrent extractions.
+_user_name_cache: dict[str, str] = {}
 
 
 def _api_headers() -> dict:
@@ -146,19 +153,19 @@ def register(app: App) -> None:
             "team_id": team_id,
         })
 
-        timer = threading.Timer(
-            THREAD_WAIT_SECONDS,
-            _post_confirmation,
-            kwargs={
-                "client": client,
-                "channel_id": channel_id,
-                "thread_ts": thread_ts,
-                "trigger_text": text,
-                "action_value": action_value,
-            },
-        )
-        timer.daemon = True
-        timer.start()
+        import time as _time
+
+        def _delayed_confirm():
+            _time.sleep(THREAD_WAIT_SECONDS)
+            _post_confirmation(
+                client=client,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                trigger_text=text,
+                action_value=action_value,
+            )
+
+        _SLACK_POOL.submit(_delayed_confirm)
 
     # ------------------------------------------------------------------
     # Confirmation message buttons
@@ -171,18 +178,15 @@ def register(app: App) -> None:
         except Exception as exc:
             print(f"[extract] bad button value: {exc}", flush=True)
             return
-        threading.Thread(
-            target=_extract_workflow_async,
-            kwargs={
-                "client": client,
-                "channel_id": value.get("channel_id"),
-                "thread_ts": value.get("thread_ts"),
-                "message_ts": body["message"]["ts"],
-                "triggered_by": value.get("triggered_by", ""),
-                "team_id": value.get("team_id", ""),
-            },
-            daemon=True,
-        ).start()
+        _SLACK_POOL.submit(
+            _extract_workflow_async,
+            client=client,
+            channel_id=value.get("channel_id"),
+            thread_ts=value.get("thread_ts"),
+            message_ts=body["message"]["ts"],
+            triggered_by=value.get("triggered_by", ""),
+            team_id=value.get("team_id", ""),
+        )
 
     @app.action("dismiss")
     def on_dismiss(ack, body, client: WebClient):
@@ -206,16 +210,13 @@ def register(app: App) -> None:
     def on_copy_json(ack, body, client: WebClient):
         ack()
         workflow_id = (body.get("actions") or [{}])[0].get("value") or ""
-        threading.Thread(
-            target=_post_json_snippet,
-            kwargs={
-                "client": client,
-                "channel_id": body["channel"]["id"],
-                "thread_ts": body["message"].get("thread_ts") or body["message"]["ts"],
-                "workflow_id": workflow_id,
-            },
-            daemon=True,
-        ).start()
+        _SLACK_POOL.submit(
+            _post_json_snippet,
+            client=client,
+            channel_id=body["channel"]["id"],
+            thread_ts=body["message"].get("thread_ts") or body["message"]["ts"],
+            workflow_id=workflow_id,
+        )
 
     @app.action("update_existing")
     def on_update_existing(ack, body, client: WebClient):
@@ -226,18 +227,15 @@ def register(app: App) -> None:
         value = verify_action((body.get("actions") or [{}])[0].get("value"))
         if not isinstance(value, dict):
             return
-        threading.Thread(
-            target=_show_update_confirmation,
-            kwargs={
-                "client": client,
-                "channel_id": body["channel"]["id"],
-                "message_ts": body["message"]["ts"],
-                "new_id": value.get("new_id", ""),
-                "existing_id": value.get("existing_id", ""),
-                "existing_name": value.get("existing_name", "the existing workflow"),
-            },
-            daemon=True,
-        ).start()
+        _SLACK_POOL.submit(
+            _show_update_confirmation,
+            client=client,
+            channel_id=body["channel"]["id"],
+            message_ts=body["message"]["ts"],
+            new_id=value.get("new_id", ""),
+            existing_id=value.get("existing_id", ""),
+            existing_name=value.get("existing_name", "the existing workflow"),
+        )
 
     @app.action("confirm_update")
     def on_confirm_update(ack, body, client: WebClient):
@@ -246,17 +244,14 @@ def register(app: App) -> None:
         value = verify_action((body.get("actions") or [{}])[0].get("value"))
         if not isinstance(value, dict):
             return
-        threading.Thread(
-            target=_perform_update,
-            kwargs={
-                "client": client,
-                "channel_id": body["channel"]["id"],
-                "message_ts": body["message"]["ts"],
-                "new_id": value.get("new_id", ""),
-                "existing_id": value.get("existing_id", ""),
-            },
-            daemon=True,
-        ).start()
+        _SLACK_POOL.submit(
+            _perform_update,
+            client=client,
+            channel_id=body["channel"]["id"],
+            message_ts=body["message"]["ts"],
+            new_id=value.get("new_id", ""),
+            existing_id=value.get("existing_id", ""),
+        )
 
     @app.action("cancel_update")
     def on_cancel_update(ack, body, client: WebClient):
@@ -266,16 +261,13 @@ def register(app: App) -> None:
         if not isinstance(value, dict):
             return
         workflow_id = value.get("new_id") or ""
-        threading.Thread(
-            target=_revert_to_workflow,
-            kwargs={
-                "client": client,
-                "channel_id": body["channel"]["id"],
-                "message_ts": body["message"]["ts"],
-                "workflow_id": workflow_id,
-            },
-            daemon=True,
-        ).start()
+        _SLACK_POOL.submit(
+            _revert_to_workflow,
+            client=client,
+            channel_id=body["channel"]["id"],
+            message_ts=body["message"]["ts"],
+            workflow_id=workflow_id,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -683,6 +675,10 @@ def _collect_thread(client: WebClient, channel: str, thread_ts: str) -> tuple[st
 def _resolve_user_name(client: WebClient, user_id: str, cache: dict[str, str]) -> str:
     if not user_id:
         return "unknown"
+    # P-16: check module-level LRU first, then per-request cache.
+    cached = _user_name_cache.get(user_id)
+    if cached:
+        return cached
     if user_id in cache:
         return cache[user_id]
     try:
@@ -696,6 +692,7 @@ def _resolve_user_name(client: WebClient, user_id: str, cache: dict[str, str]) -
         )
     except Exception:
         name = user_id
+    _user_name_cache[user_id] = name
     cache[user_id] = name
     return name
 

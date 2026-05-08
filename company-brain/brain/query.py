@@ -29,6 +29,15 @@ from typing import Any
 import anthropic
 from dotenv import load_dotenv
 
+_anthropic: anthropic.Anthropic | None = None
+
+
+def _get_anthropic() -> anthropic.Anthropic:
+    global _anthropic
+    if _anthropic is None:
+        _anthropic = anthropic.Anthropic()
+    return _anthropic
+
 from brain.anthropic_client import CircuitOpenError, messages_create
 from brain.embedder import embed_query
 from brain.logger import get_logger
@@ -218,7 +227,7 @@ def query_brain(question: str, top_k: int = 6, org_id: str | None = None) -> dic
     )
     user_message = f"Knowledge context:\n\n{context}\n\nQuestion: {question}"
 
-    client = anthropic.Anthropic()
+    client = _get_anthropic()
     try:
         message = messages_create(
             client,
@@ -288,7 +297,7 @@ def generate_skills_file(
     )
     user_message = f"Process name: {process_name}\n\nKnowledge chunks:\n\n{context}"
 
-    client = anthropic.Anthropic()
+    client = _get_anthropic()
     message = messages_create(
         client,
         model=MODEL,
@@ -335,7 +344,7 @@ def generate_workflow_from_text(
     """
     user_message = f"Process name: {name}\n\nSource material:\n\n{content}"
 
-    client = anthropic.Anthropic()
+    client = _get_anthropic()
     message = messages_create(
         client,
         model=MODEL,

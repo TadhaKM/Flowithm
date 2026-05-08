@@ -443,6 +443,7 @@ def find_api_keys_by_prefix(prefix: str) -> list[dict[str, Any]]:
         client.table("api_keys")
         .select("id,name,key_hash,key_prefix,is_active,org_id")
         .eq("key_prefix", prefix)
+        .eq("is_active", True)
         .execute()
     )
     return result.data or []

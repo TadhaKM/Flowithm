@@ -31,7 +31,7 @@ def test_detects_conflict(mock_supabase, mock_voyage, mock_anthropic, sample_ski
     from brain.drift import check_for_drift
 
     existing_skill_id = "fixture-existing-1"
-    mock_supabase.rows_by_table["skills"] = [{
+    skill_row = {
         "id": existing_skill_id,
         "process_name": "Customer refund handling",
         "description": "",
@@ -44,7 +44,16 @@ def test_detects_conflict(mock_supabase, mock_voyage, mock_anthropic, sample_ski
         "summary_embedding": [0.1] * 1024,
         "archived": False,
         "org_id": "00000000-0000-0000-0000-000000000001",
-    }]
+        "source": "manual",
+        "version": 1,
+        "generated_at": "2025-01-01T00:00:00Z",
+        "needs_review": False,
+        "needs_review_reason": None,
+        "similarity": 0.9,
+    }
+    mock_supabase.rows_by_table["skills"] = [skill_row]
+    # The new code uses match_skills RPC instead of loading all skills.
+    mock_supabase.rpc_results = {"match_skills": [skill_row]}
     mock_anthropic["response_text"] = json.dumps({
         "conflicts": [{
             "existing_skill_id": existing_skill_id,
@@ -79,13 +88,28 @@ def test_hallucinated_skill_id_is_dropped(mock_supabase, mock_voyage, mock_anthr
     set, we don't trust it and skip the row."""
     from brain.drift import check_for_drift
 
-    mock_supabase.rows_by_table["skills"] = [{
+    real_skill = {
         "id": "real-skill",
         "process_name": "Refunds",
+        "description": "",
+        "process_trigger": "",
+        "steps": [],
+        "decision_rules": [],
+        "approvals": [],
+        "exceptions": [],
+        "sources": [],
+        "source": "manual",
+        "version": 1,
+        "generated_at": "2025-01-01T00:00:00Z",
+        "needs_review": False,
+        "needs_review_reason": None,
+        "similarity": 0.9,
         "summary_embedding": [0.1] * 1024,
         "archived": False,
         "org_id": "00000000-0000-0000-0000-000000000001",
-    }]
+    }
+    mock_supabase.rows_by_table["skills"] = [real_skill]
+    mock_supabase.rpc_results = {"match_skills": [real_skill]}
     mock_anthropic["response_text"] = json.dumps({
         "conflicts": [{
             "existing_skill_id": "ghost-skill-id",  # never in our candidate set

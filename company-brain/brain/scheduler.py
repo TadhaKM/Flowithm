@@ -104,7 +104,7 @@ class IngestionScheduler:
         # Lazy imports — keep this module importable without optional deps
         # (tests that just import scheduler shouldn't pay for supabase, etc.).
         from brain.drift import check_chunks_against_skills
-        from brain.embedder import embed_and_store
+        from brain.embedder import embed_and_store_batch
         from brain.store import (
             get_client,
             insert_ingest_run,
@@ -178,13 +178,13 @@ class IngestionScheduler:
                     try:
                         org_results["sources_checked"] += 1
                         chunks = self._fetch_chunks_for_source(source)
-                        for chunk in chunks:
-                            stored_id = embed_and_store(chunk, org_id=org_id)
-                            if stored_id is None:
-                                org_results["skipped_chunks"] += 1
-                            else:
-                                org_results["new_chunks"] += 1
-                                org_newly_embedded.append(chunk)
+                        # P-1: batch embed+store instead of per-chunk round-trips.
+                        new_count, skip_count, newly = embed_and_store_batch(
+                            chunks, org_id=org_id,
+                        )
+                        org_results["new_chunks"] += new_count
+                        org_results["skipped_chunks"] += skip_count
+                        org_newly_embedded.extend(newly)
                         update_source_last_synced(str(source["id"]), _now_utc().isoformat())
                     except NotImplementedError as exc:
                         msg = f"{source['source_type']} source {source['id']}: {exc}"
