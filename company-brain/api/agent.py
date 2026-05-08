@@ -161,9 +161,14 @@ def create_api_key(req: CreateKeyRequest, _admin=AdminTokenDep) -> dict[str, Any
         "Returns every key (active and revoked). Plaintext is never included."
     ),
 )
-def list_keys(request: Request, _admin=AdminTokenDep) -> list[dict[str, Any]]:
+def list_keys(
+    request: Request,
+    _admin=AdminTokenDep,
+    limit: int = Query(50, ge=1, le=200),
+) -> list[dict[str, Any]]:
     org = request.headers.get("x-org-id") or None
-    return list_api_keys(org_id=org)
+    rows = list_api_keys(org_id=org)
+    return rows[:limit]
 
 
 @agent_app.delete(
@@ -470,7 +475,8 @@ def _maybe_trigger_drift_from_exception(skill_id: str, exception_note: str) -> N
         if not skill:
             return
 
-        client = anthropic.Anthropic()
+        from brain.drift import _get_anthropic
+        client = _get_anthropic()
         prompt = (
             f"Existing skill (JSON):\n{skill}\n\n"
             f"Exception just reported by an agent: {exception_note}\n\n"

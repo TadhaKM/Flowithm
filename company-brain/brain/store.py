@@ -120,7 +120,7 @@ def count_chunks(org_id: str | None = None) -> int:
     client = get_client()
     result = (
         client.table(TABLE)
-        .select("*", count="exact", head=True)
+        .select("*", count="planned", head=True)
         .eq("org_id", org_id or _default_org_id())
         .execute()
     )
@@ -293,7 +293,7 @@ def list_skills_index(
         client.table(SKILLS_TABLE)
         .select(
             "id,process_name,process_trigger,steps,source,generated_at,needs_review,needs_review_reason",
-            count="exact",
+            count="planned",
         )
         .eq("archived", False)
         .eq("org_id", org_id or _default_org_id())

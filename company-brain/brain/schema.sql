@@ -414,6 +414,27 @@ $$;
 
 
 -- ---------------------------------------------------------------------------
+-- Combined audit: bump counter + insert request row in one round-trip.
+-- ---------------------------------------------------------------------------
+create or replace function log_api_request(
+    p_key_id         uuid,
+    p_endpoint       text,
+    p_response_ms    integer,
+    p_query_text     text     default null,
+    p_matched_skill  uuid     default null,
+    p_org_id         uuid     default null
+) returns void
+language sql
+as $$
+    update api_keys
+       set request_count = request_count + 1, last_used_at = now()
+     where id = p_key_id;
+    insert into api_requests (api_key_id, endpoint, response_time_ms, query_text, matched_skill_id, org_id)
+    values (p_key_id, p_endpoint, p_response_ms, p_query_text, p_matched_skill, p_org_id);
+$$;
+
+
+-- ---------------------------------------------------------------------------
 -- Atomic counter bump for api_keys.request_count + last_used_at.
 -- Called from the per-request BackgroundTask in api/auth.py. Doing this
 -- as a single SQL statement avoids the read-modify-write race on counter.
@@ -624,6 +645,57 @@ create index if not exists skills_org_idx            on skills (org_id);
 create index if not exists chunks_org_idx            on chunks (org_id);
 create index if not exists conflicts_org_idx         on conflicts (org_id);
 create index if not exists connected_sources_org_idx on connected_sources (org_id);
+-- ---------------------------------------------------------------------------
+-- run_staleness_pass — push the threshold comparison into SQL so Python
+-- doesn't need to load every skill row into memory.
+-- ---------------------------------------------------------------------------
+create or replace function run_staleness_pass(
+    p_org_id          uuid,
+    p_threshold_days  integer
+) returns table (flagged_count bigint, cleared_count bigint)
+language plpgsql
+as $$
+declare
+    v_flagged bigint;
+    v_cleared bigint;
+begin
+    -- Flag: never reviewed AND old, or last review older than threshold.
+    with flagged as (
+        update skills
+           set needs_review = true,
+               needs_review_reason = 'Hasn''t been reviewed recently',
+               stale_flagged_at = now()
+         where archived = false
+           and org_id = p_org_id
+           and needs_review = false
+           and (
+               (reviewed_at is null and generated_at < now() - (p_threshold_days || ' days')::interval)
+               or reviewed_at < now() - (p_threshold_days || ' days')::interval
+           )
+        returning id
+    )
+    select count(*) into v_flagged from flagged;
+
+    -- Clear: reviewed recently but still flagged.
+    with cleared as (
+        update skills
+           set needs_review = false,
+               needs_review_reason = null,
+               stale_flagged_at = null
+         where archived = false
+           and org_id = p_org_id
+           and needs_review = true
+           and (
+               (reviewed_at is not null and reviewed_at >= now() - (p_threshold_days || ' days')::interval)
+           )
+        returning id
+    )
+    select count(*) into v_cleared from cleared;
+
+    return query select v_flagged, v_cleared;
+end;
+$$;
+
 -- M-13: composite for the scheduler's list_active_connected_sources query.
 create index if not exists connected_sources_org_active_idx on connected_sources (org_id, is_active);
 create index if not exists api_keys_org_idx          on api_keys (org_id);
@@ -660,11 +732,15 @@ alter table api_keys          enable row level security;
 -- operator that match_chunks uses below. Use vector_l2_ops or vector_ip_ops
 -- if you switch to Euclidean / inner-product instead.
 --
--- `lists = 100` is a reasonable starting point for tens-of-thousands of rows.
--- Rule of thumb: lists ≈ sqrt(rows). Bump it as the corpus grows and rebuild
--- the index. IVFFlat must be built AFTER you have data for best results — if
--- you build on an empty table the centroids are meaningless. Re-create with
--- `reindex index chunks_embedding_idx;` after a large initial ingest.
+-- `lists = 100` is a reasonable starting point up to ~10K rows.
+-- Rule of thumb: lists ≈ sqrt(rows). At 50K+ chunks, reindex with a
+-- higher lists count or migrate to HNSW for better recall without tuning:
+--   create index chunks_embedding_hnsw_idx on chunks
+--       using hnsw (embedding vector_cosine_ops)
+--       with (m = 16, ef_construction = 64);
+-- IVFFlat must be built AFTER you have data — centroids on an empty
+-- table are meaningless. Reindex after a large initial ingest:
+--   reindex index chunks_embedding_idx;
 create index if not exists chunks_embedding_idx
     on chunks
     using ivfflat (embedding vector_cosine_ops)

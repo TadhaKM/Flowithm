@@ -89,17 +89,18 @@ def _log_request(
     matched_skill_id: str | None = None,
     org_id: str | None = None,
 ) -> None:
-    """Background-task body — never raises."""
+    """Background-task body — never raises. Uses a single RPC to bump
+    the counter and insert the audit row in one DB round-trip."""
     try:
-        increment_api_key_usage(api_key_id)
-        insert_api_request(
-            api_key_id=api_key_id,
-            endpoint=endpoint,
-            response_time_ms=response_time_ms,
-            query_text=query_text,
-            matched_skill_id=matched_skill_id,
-            org_id=org_id,
-        )
+        from brain.store import get_client
+        get_client().rpc("log_api_request", {
+            "p_key_id": api_key_id,
+            "p_endpoint": endpoint,
+            "p_response_ms": response_time_ms,
+            "p_query_text": query_text,
+            "p_matched_skill": matched_skill_id,
+            "p_org_id": org_id or None,
+        }).execute()
         if response_time_ms > SLOW_REQUEST_THRESHOLD_MS:
             # Never log the verbatim query — it's customer prompt material
             # that often contains PII. The full text is already persisted

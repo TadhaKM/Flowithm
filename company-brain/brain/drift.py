@@ -529,7 +529,7 @@ def schedule_drift_check(
 # ---------------------------------------------------------------------------
 
 def get_unresolved_conflicts(
-    include_snoozed: bool = False, org_id: str | None = None
+    include_snoozed: bool = False, org_id: str | None = None, limit: int = 200
 ) -> list[dict[str, Any]]:
     """Conflicts still needing a decision (scoped to current org)."""
     from brain.store import _default_org_id
@@ -543,6 +543,7 @@ def get_unresolved_conflicts(
             .eq("org_id", org)
             .in_("status", ["unresolved", "snoozed"])
             .order("created_at", desc=True)
+            .limit(limit)
             .execute()
         ).data or []
     else:
@@ -552,6 +553,7 @@ def get_unresolved_conflicts(
             .eq("org_id", org)
             .eq("status", "unresolved")
             .order("created_at", desc=True)
+            .limit(limit)
             .execute()
         ).data or []
         snoozed_expired = (
@@ -561,6 +563,7 @@ def get_unresolved_conflicts(
             .eq("status", "snoozed")
             .lt("snoozed_until", _now_iso())
             .order("created_at", desc=True)
+            .limit(limit)
             .execute()
         ).data or []
         rows = unresolved + snoozed_expired

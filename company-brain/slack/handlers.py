@@ -153,19 +153,21 @@ def register(app: App) -> None:
             "team_id": team_id,
         })
 
-        import time as _time
-
-        def _delayed_confirm():
-            _time.sleep(THREAD_WAIT_SECONDS)
-            _post_confirmation(
-                client=client,
-                channel_id=channel_id,
-                thread_ts=thread_ts,
-                trigger_text=text,
-                action_value=action_value,
-            )
-
-        _SLACK_POOL.submit(_delayed_confirm)
+        # Use a one-shot Timer so the 60s sleep doesn't tie up the
+        # bounded worker pool (it would starve button clicks).
+        timer = threading.Timer(
+            THREAD_WAIT_SECONDS,
+            _post_confirmation,
+            kwargs={
+                "client": client,
+                "channel_id": channel_id,
+                "thread_ts": thread_ts,
+                "trigger_text": text,
+                "action_value": action_value,
+            },
+        )
+        timer.daemon = True
+        timer.start()
 
     # ------------------------------------------------------------------
     # Confirmation message buttons

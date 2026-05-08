@@ -153,6 +153,13 @@ class SkillFileResponse(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Bump the sync-route threadpool from the default ~40 to 200 so
+    # concurrent agent requests don't queue behind slow Anthropic calls.
+    try:
+        from anyio import to_thread
+        to_thread.current_default_thread_limiter().total_tokens = 200
+    except Exception:
+        pass
     count = _cached_chunk_count()
     log.info("api startup", extra={"chunks_indexed": count})
     # Best-effort scheduler boot. If APScheduler / Supabase aren't available
@@ -415,7 +422,7 @@ def health(request: Request) -> dict:
         result = (
             get_client()
             .table("skills")
-            .select("id", count="exact")
+            .select("id", count="planned")
             .limit(1)
             .execute()
         )
@@ -575,9 +582,15 @@ def resolve_conflict_endpoint(
 
 
 @app.get("/skills/{skill_id}/conflicts")
-def skill_conflicts(skill_id: str, org_id: str = _OrgDep, _admin=_AdminDep) -> list[dict]:
-    """Full conflict history for a single skill — any status."""
-    return get_conflict_history(skill_id, org_id=org_id)
+def skill_conflicts(
+    skill_id: str,
+    limit: int = Query(50, ge=1, le=200),
+    org_id: str = _OrgDep,
+    _admin=_AdminDep,
+) -> list[dict]:
+    """Conflict history for a single skill — any status."""
+    rows = get_conflict_history(skill_id, org_id=org_id)
+    return rows[:limit]
 
 
 @app.post("/skills/{skill_id}/review")
@@ -652,9 +665,14 @@ def ingest_trigger(_admin=_AdminDep) -> dict:
 
 
 @app.get("/sources")
-def sources_list(org_id: str = _OrgDep, _admin=_AdminDep) -> list[dict]:
-    """Every connected source for this org. Tokens redacted in the config field."""
-    return list_connected_sources(redact=True, org_id=org_id)
+def sources_list(
+    limit: int = Query(50, ge=1, le=200),
+    org_id: str = _OrgDep,
+    _admin=_AdminDep,
+) -> list[dict]:
+    """Connected sources for this org. Tokens redacted."""
+    rows = list_connected_sources(redact=True, org_id=org_id)
+    return rows[:limit]
 
 
 @app.post("/sources")
