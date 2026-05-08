@@ -209,6 +209,28 @@ create index if not exists skills_archived_idx on skills (archived);
 -- early so the unique index on (org_id, lower(process_name)) can reference it.
 alter table skills add column if not exists org_id uuid references organisations(id);
 
+-- Heal pre-existing accept-conflict partial failures before the H-4 unique
+-- index gets created: if more than one non-archived skill shares
+-- (org_id, lower(process_name)), keep the newest (by generated_at, then id
+-- as tiebreaker) and archive the rest. Idempotent — a no-op once the
+-- constraint below is in place and enforcing uniqueness on new writes.
+update skills
+   set archived    = true,
+       archived_at = coalesce(archived_at, now())
+ where archived = false
+   and id in (
+       select id from (
+           select id,
+                  row_number() over (
+                      partition by org_id, lower(process_name)
+                      order by generated_at desc, id desc
+                  ) as rn
+             from skills
+            where archived = false
+       ) ranked
+       where rn > 1
+   );
+
 -- H-4: backstop constraint — prevents two non-archived skills with the
 -- same process_name in one org (detects accept-path partial failures).
 create unique index if not exists skills_org_process_active_idx
