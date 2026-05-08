@@ -3,13 +3,15 @@
 // POST also injects ADMIN_TOKEN.
 import { NextResponse } from "next/server";
 
-import { adminTokenMissing, orgHeaders } from "@/lib/org";
+import { MissingOrgSession, adminTokenMissing, orgHeaders, unauthorisedResponse } from "@/lib/org";
 
 const API_URL = (process.env.FLOWITHM_API_URL || "http://localhost:8000").replace(/\/$/, "");
 
 export async function GET() {
   try {
-    const headers = await orgHeaders();
+    // GET /sources is now admin-gated server-side too — list still
+    // returns redacted configs but only to authenticated admin callers.
+    const headers = await orgHeaders({ admin: true });
     const res = await fetch(`${API_URL}/sources`, { headers, cache: "no-store" });
     const body = await res.text();
     return new NextResponse(body, {
@@ -17,6 +19,7 @@ export async function GET() {
       headers: { "content-type": res.headers.get("content-type") || "application/json" },
     });
   } catch (err) {
+    if (err instanceof MissingOrgSession) return unauthorisedResponse();
     return NextResponse.json(
       { error: err instanceof Error ? err.message : String(err) },
       { status: 502 },
@@ -46,6 +49,7 @@ export async function POST(request: Request) {
       headers: { "content-type": res.headers.get("content-type") || "application/json" },
     });
   } catch (err) {
+    if (err instanceof MissingOrgSession) return unauthorisedResponse();
     return NextResponse.json(
       { error: err instanceof Error ? err.message : String(err) },
       { status: 502 },

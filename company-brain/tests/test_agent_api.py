@@ -10,14 +10,14 @@ from __future__ import annotations
 # /api/v1/keys (admin gate)
 # ---------------------------------------------------------------------------
 
-def test_list_keys_without_admin_token_returns_401(test_client):
-    res = test_client.get("/api/v1/keys")
+def test_list_keys_without_admin_token_returns_401(unauthed_client):
+    res = unauthed_client.get("/api/v1/keys")
     assert res.status_code == 401
     assert res.json().get("code") == "MISSING_API_KEY"
 
 
-def test_revoke_key_without_admin_token_returns_401(test_client):
-    res = test_client.delete("/api/v1/keys/some-id")
+def test_revoke_key_without_admin_token_returns_401(unauthed_client):
+    res = unauthed_client.delete("/api/v1/keys/some-id")
     assert res.status_code == 401
 
 
@@ -40,8 +40,8 @@ def test_create_key_admin_returns_plaintext_once(test_client, monkeypatch, mock_
 # /api/v1/skills/* (Bearer auth)
 # ---------------------------------------------------------------------------
 
-def test_list_skills_without_auth_returns_401(test_client):
-    res = test_client.get("/api/v1/skills")
+def test_list_skills_without_auth_returns_401(unauthed_client):
+    res = unauthed_client.get("/api/v1/skills")
     assert res.status_code == 401
 
 

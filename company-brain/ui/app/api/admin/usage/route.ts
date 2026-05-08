@@ -1,8 +1,18 @@
 // Aggregates api_requests + skills into the dashboard's usage stats.
 // Reads Supabase server-side (service key) and returns:
 //   { total_30d, avg_response_ms_30d, most_queried_process, daily_14d: [{date, count}] }
+//
+// SECURITY (C-6): Requires a session-bound flowithm_org_id cookie (we
+// refuse to fall through to FALLBACK_ORG_ID here — usage stats include
+// query_text, the verbatim customer prompts agents send through the
+// public API, often containing PII). Then we narrow api_requests by
+// the api_keys belonging to that org via a JOIN-equivalent two-step:
+// first SELECT id from api_keys WHERE org_id = X, then filter
+// api_requests by api_key_id IN (those_ids). Without that filter, the
+// service-role key would return every tenant's queries.
 import { NextResponse } from "next/server";
 
+import { getOrgIdFromCookie, unauthorisedResponse } from "../../../../lib/org";
 import { getSupabase } from "../../../../lib/supabase";
 
 const DAYS_RANGE_STATS = 30;
@@ -41,20 +51,41 @@ function emptyDays(n: number, offsetMin: number): { date: string; count: number 
 }
 
 export async function GET(request: Request) {
+  const orgId = await getOrgIdFromCookie();
+  if (!orgId) return unauthorisedResponse();
+
   const { searchParams } = new URL(request.url);
   const offsetMin = parseInt(searchParams.get("tz_offset_min") || "0", 10);
   const safeOffset = Number.isFinite(offsetMin) ? offsetMin : 0;
   const supa = getSupabase();
   const since30 = new Date(Date.now() - DAYS_RANGE_STATS * 86_400_000).toISOString();
 
-  // TODO multi-tenancy: api_requests doesn't carry org_id directly (it
-  // references api_keys which does). For multi-tenant deploys, filter via
-  // `api_key_id IN (SELECT id FROM api_keys WHERE org_id = X)`. Single-org
-  // deploys see all their own usage either way.
+  // Narrow api_requests to keys this org owns. Two-step because PostgREST
+  // doesn't support sub-selects in the filter directly.
+  const { data: keyRows, error: keyErr } = await supa
+    .from("api_keys")
+    .select("id")
+    .eq("org_id", orgId);
+  if (keyErr) {
+    return NextResponse.json({ error: keyErr.message }, { status: 500 });
+  }
+  const apiKeyIds: string[] = (keyRows || []).map((r: { id: string }) => r.id);
+
+  if (apiKeyIds.length === 0) {
+    // No keys yet — return zeroed stats rather than scanning the table.
+    return NextResponse.json({
+      total_30d: 0,
+      avg_response_ms_30d: 0,
+      most_queried_process: null,
+      daily_14d: emptyDays(DAYS_RANGE_CHART, safeOffset),
+    });
+  }
+
   const { data, error } = await supa
     .from("api_requests")
     .select("endpoint,query_text,matched_skill_id,response_time_ms,created_at")
     .gte("created_at", since30)
+    .in("api_key_id", apiKeyIds)
     .order("created_at", { ascending: false })
     .limit(10000);
 

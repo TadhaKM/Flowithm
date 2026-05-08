@@ -153,16 +153,16 @@ def test_admin_token_constant_time_eq():
 # /api/v1/keys admin gate via TestClient
 # ---------------------------------------------------------------------------
 
-def test_create_key_without_admin_token_returns_401(test_client):
-    res = test_client.post("/api/v1/keys", json={"name": "Production"})
+def test_create_key_without_admin_token_returns_401(unauthed_client):
+    res = unauthed_client.post("/api/v1/keys", json={"name": "Production"})
     assert res.status_code == 401
     body = res.json()
     assert body.get("code") == "MISSING_API_KEY"
 
 
-def test_create_key_with_wrong_admin_token_returns_401(test_client, monkeypatch):
+def test_create_key_with_wrong_admin_token_returns_401(unauthed_client, monkeypatch):
     monkeypatch.setenv("ADMIN_TOKEN", "expected-token")
-    res = test_client.post(
+    res = unauthed_client.post(
         "/api/v1/keys",
         json={"name": "Production"},
         headers={"Authorization": "Bearer wrong-token"},

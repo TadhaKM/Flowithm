@@ -12,8 +12,11 @@ from fastapi.testclient import TestClient
 @pytest.fixture
 def client():
     # Import inside the fixture so any module-level state inits per-test.
+    # Default Authorization header carries the test admin token so the
+    # post-C-4 admin gate on every internal endpoint passes — tests are
+    # exercising the route logic, not the auth dependency.
     from api.main import app
-    return TestClient(app)
+    return TestClient(app, headers={"Authorization": "Bearer test-admin-token"})
 
 
 # ---------------------------------------------------------------------------

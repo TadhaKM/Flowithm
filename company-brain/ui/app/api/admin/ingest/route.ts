@@ -3,13 +3,13 @@
 // last run rather than the cross-org aggregate cached in memory.
 import { NextResponse } from "next/server";
 
-import { adminTokenMissing, orgHeaders } from "@/lib/org";
+import { MissingOrgSession, adminTokenMissing, orgHeaders, unauthorisedResponse } from "@/lib/org";
 
 const API_URL = (process.env.FLOWITHM_API_URL || "http://localhost:8000").replace(/\/$/, "");
 
 export async function GET() {
   try {
-    const headers = await orgHeaders();
+    const headers = await orgHeaders({ admin: true });
     const res = await fetch(`${API_URL}/ingest/status`, { headers, cache: "no-store" });
     const body = await res.text();
     return new NextResponse(body, {
@@ -17,6 +17,7 @@ export async function GET() {
       headers: { "content-type": res.headers.get("content-type") || "application/json" },
     });
   } catch (err) {
+    if (err instanceof MissingOrgSession) return unauthorisedResponse();
     return NextResponse.json(
       { error: err instanceof Error ? err.message : String(err) },
       { status: 502 },
@@ -44,6 +45,7 @@ export async function POST() {
       headers: { "content-type": res.headers.get("content-type") || "application/json" },
     });
   } catch (err) {
+    if (err instanceof MissingOrgSession) return unauthorisedResponse();
     return NextResponse.json(
       { error: err instanceof Error ? err.message : String(err) },
       { status: 502 },

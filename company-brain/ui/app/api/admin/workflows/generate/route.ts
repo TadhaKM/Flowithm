@@ -4,14 +4,14 @@
 // in-dashboard generator that needs the org binding.
 import { NextResponse } from "next/server";
 
-import { orgHeaders } from "@/lib/org";
+import { MissingOrgSession, orgHeaders, unauthorisedResponse } from "@/lib/org";
 
 const API_URL = (process.env.FLOWITHM_API_URL || "http://localhost:8000").replace(/\/$/, "");
 
 export async function POST(request: Request) {
   const payload = await request.json().catch(() => ({}));
   try {
-    const headers = await orgHeaders({ json: true });
+    const headers = await orgHeaders({ admin: true, json: true });
     const res = await fetch(`${API_URL}/workflows/generate`, {
       method: "POST",
       headers,
@@ -24,6 +24,7 @@ export async function POST(request: Request) {
       headers: { "content-type": res.headers.get("content-type") || "application/json" },
     });
   } catch (err) {
+    if (err instanceof MissingOrgSession) return unauthorisedResponse();
     return NextResponse.json(
       { error: err instanceof Error ? err.message : String(err) },
       { status: 502 },

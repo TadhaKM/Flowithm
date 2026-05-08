@@ -419,8 +419,24 @@ def mock_anthropic(monkeypatch):
 
 @pytest.fixture
 def test_client(monkeypatch):
-    """FastAPI TestClient with the global API + cached chunk count stubbed
-    so /health probes don't try to reach Supabase by default."""
+    """FastAPI TestClient. Attaches `Authorization: Bearer test-admin-token`
+    by default so the post-C-4 admin gate on internal endpoints (every
+    /query, /skills, /workflows, /history, /conflicts, /sources call)
+    passes without each test having to plumb the header. Tests that
+    target the public agent API (/api/v1/skills/*) override the header
+    per-request with their own Bearer key — TestClient merges per-call
+    headers on top of these defaults.
+    """
+    from fastapi.testclient import TestClient
+    from api.main import app
+    return TestClient(app, headers={"Authorization": "Bearer test-admin-token"})
+
+
+@pytest.fixture
+def unauthed_client(monkeypatch):
+    """Plain TestClient with NO default Authorization. Use this in tests
+    that assert 401 paths — the bearer-default test_client fixture would
+    short-circuit those by always passing the admin gate."""
     from fastapi.testclient import TestClient
     from api.main import app
     return TestClient(app)

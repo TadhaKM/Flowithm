@@ -39,6 +39,21 @@ from slack.formatter import (
 FLOWITHM_URL = os.environ.get("FLOWITHM_URL", "http://localhost:3000").rstrip("/")
 FLOWITHM_API_URL = os.environ.get("FLOWITHM_API_URL", "http://localhost:8000").rstrip("/")
 
+
+def _api_headers() -> dict:
+    """Build the Authorization + X-Org-ID headers every FastAPI request
+    from the bot needs. The internal endpoints are admin-gated post the
+    C-4 lockdown — without the admin token every bot HTTP call would 401.
+    """
+    headers: dict[str, str] = {}
+    admin_token = os.environ.get("ADMIN_TOKEN", "")
+    org_id = os.environ.get("ORG_ID", "")
+    if admin_token:
+        headers["Authorization"] = f"Bearer {admin_token}"
+    if org_id:
+        headers["X-Org-ID"] = org_id
+    return headers
+
 MIN_WORDS = 20
 THREAD_WAIT_SECONDS = 60
 TOKEN_CAP = 4000
@@ -349,11 +364,6 @@ def _extract_workflow_async(
         "workspace": team_id,
     }
     try:
-        # Pass X-Org-ID for multi-tenancy. Self-hosted bots default to the
-        # ORG_ID env var; future per-workspace mapping would resolve from
-        # the Slack `team_id` instead.
-        org_id = os.environ.get("ORG_ID", "")
-        headers = {"X-Org-ID": org_id} if org_id else {}
         resp = requests.post(
             f"{FLOWITHM_API_URL}/workflows/generate",
             json={
@@ -362,7 +372,7 @@ def _extract_workflow_async(
                 "source": "slack",
                 "source_metadata": source_metadata,
             },
-            headers=headers,
+            headers=_api_headers(),
             timeout=90,
         )
         resp.raise_for_status()
@@ -388,6 +398,7 @@ def _extract_workflow_async(
             sim = requests.get(
                 f"{FLOWITHM_API_URL}/workflows/similar",
                 params={"name": process_name, "exclude_id": workflow_id},
+                headers=_api_headers(),
                 timeout=10,
             )
             if sim.ok:
@@ -535,6 +546,7 @@ def _perform_update(
     try:
         resp = requests.post(
             f"{FLOWITHM_API_URL}/workflows/{existing_id}/archive",
+            headers=_api_headers(),
             timeout=10,
         )
         resp.raise_for_status()
@@ -620,7 +632,11 @@ def _fetch_workflow(workflow_id: str) -> dict[str, Any] | None:
     if not workflow_id:
         return None
     try:
-        resp = requests.get(f"{FLOWITHM_API_URL}/workflows/{workflow_id}", timeout=10)
+        resp = requests.get(
+            f"{FLOWITHM_API_URL}/workflows/{workflow_id}",
+            headers=_api_headers(),
+            timeout=10,
+        )
         resp.raise_for_status()
         return resp.json()
     except Exception as exc:

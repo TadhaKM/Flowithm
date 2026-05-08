@@ -89,6 +89,13 @@ def get_org_id(request: Request) -> str:
 
 _OrgDep = Depends(get_org_id)
 
+# Admin gate for every internal org-scoped endpoint. The dashboard's
+# Next.js proxies inject ADMIN_TOKEN server-side; the Slack bot does
+# the same. The public internet → no admin token → 401.
+from api.auth import verify_admin_token  # noqa: E402
+
+_AdminDep = Depends(verify_admin_token)
+
 
 def _cached_chunk_count() -> int:
     """count_chunks() result, refreshed at most once per CHUNK_COUNT_TTL_SECONDS."""
@@ -297,18 +304,25 @@ def _map_supabase_error(exc: Exception) -> tuple[int, str, str] | None:
     return None
 
 
+# Every endpoint below is org-scoped AND admin-gated. The dashboard's
+# Next.js proxy routes inject ADMIN_TOKEN server-side; the Slack bot
+# does the same. Public internet → no admin token → 401. The X-Org-ID
+# header is now only honoured for principals that already authenticated
+# with the admin token, closing the cross-tenant access path that
+# previously let any caller hit any org by header alone.
+
 @app.post("/query")
-def query(req: QueryRequest, org_id: str = _OrgDep) -> dict:
+def query(req: QueryRequest, org_id: str = _OrgDep, _admin=_AdminDep) -> dict:
     return query_brain(req.question, top_k=req.top_k, org_id=org_id)
 
 
 @app.post("/skills", response_model=SkillFileResponse)
-def skills(req: SkillsRequest, org_id: str = _OrgDep):
+def skills(req: SkillsRequest, org_id: str = _OrgDep, _admin=_AdminDep):
     return generate_skills_file(req.process_name, org_id=org_id)
 
 
 @app.post("/workflows/generate")
-def generate_workflow(req: WorkflowRequest, org_id: str = _OrgDep) -> dict:
+def generate_workflow(req: WorkflowRequest, org_id: str = _OrgDep, _admin=_AdminDep) -> dict:
     return generate_workflow_from_text(
         req.name,
         req.content,
@@ -326,6 +340,7 @@ def workflow_similar(
     threshold: float = 0.4,
     exclude_id: str = "",
     org_id: str = _OrgDep,
+    _admin=_AdminDep,
 ) -> dict | None:
     """Fuzzy-match an existing non-archived workflow by name. Returns null if none."""
     return find_similar_workflow(
@@ -337,7 +352,7 @@ def workflow_similar(
 
 
 @app.get("/workflows/{workflow_id}")
-def get_workflow_endpoint(workflow_id: str, org_id: str = _OrgDep) -> dict:
+def get_workflow_endpoint(workflow_id: str, org_id: str = _OrgDep, _admin=_AdminDep) -> dict:
     """Fetch a single workflow row by id — UI deeplink and Slack-bot re-fetch."""
     wf = get_workflow(workflow_id, org_id=org_id)
     if not wf:
@@ -346,7 +361,7 @@ def get_workflow_endpoint(workflow_id: str, org_id: str = _OrgDep) -> dict:
 
 
 @app.post("/workflows/{workflow_id}/archive")
-def archive_workflow_endpoint(workflow_id: str, org_id: str = _OrgDep) -> dict:
+def archive_workflow_endpoint(workflow_id: str, org_id: str = _OrgDep, _admin=_AdminDep) -> dict:
     """Mark a workflow archived. Used by the Slack bot's Update existing flow."""
     ok = archive_workflow(workflow_id, org_id=org_id)
     if not ok:
@@ -355,12 +370,12 @@ def archive_workflow_endpoint(workflow_id: str, org_id: str = _OrgDep) -> dict:
 
 
 @app.get("/history")
-def history(limit: int = 5, org_id: str = _OrgDep) -> list[dict]:
+def history(limit: int = 5, org_id: str = _OrgDep, _admin=_AdminDep) -> list[dict]:
     return list_workflows(limit=limit, org_id=org_id)
 
 
 @app.delete("/history")
-def clear_history(org_id: str = _OrgDep) -> dict:
+def clear_history(org_id: str = _OrgDep, _admin=_AdminDep) -> dict:
     """Wipe all rows from the skills table — backs the UI's Clear all button."""
     cleared = clear_workflows(org_id=org_id)
     return {"status": "ok", "cleared": cleared}
@@ -459,10 +474,33 @@ class SetupRequest(BaseModel):
 
 
 @app.post("/setup")
-def setup(req: SetupRequest) -> dict:
+def setup(req: SetupRequest, request: Request) -> dict:
     name = (req.company_name or "").strip()
     if not name:
         raise HTTPException(400, "company_name is required")
+
+    # Bootstrap gate. The very first call (no orgs in the DB yet) is
+    # allowed unauthenticated so a fresh deploy can self-bootstrap.
+    # Every subsequent call requires Authorization: Bearer $BOOTSTRAP_TOKEN
+    # so the public internet can't DoS the DB by minting orgs at will,
+    # and can't farm session cookies for the dashboard's admin proxies.
+    from brain.store import list_organisations
+    orgs = list_organisations()
+    if orgs:
+        bootstrap = os.environ.get("BOOTSTRAP_TOKEN", "").strip()
+        if not bootstrap:
+            raise HTTPException(
+                403,
+                "Setup is closed: BOOTSTRAP_TOKEN is not configured. "
+                "Set it in the FastAPI environment to enable additional org creation.",
+            )
+        try:
+            from api.auth import _extract_bearer, _constant_time_eq
+            token = _extract_bearer(request.headers.get("authorization"))
+        except HTTPException:
+            raise HTTPException(401, "BOOTSTRAP_TOKEN required to create another organisation.")
+        if not _constant_time_eq(token, bootstrap):
+            raise HTTPException(401, "Invalid bootstrap token.")
     # Slugify: lowercase, alphanumeric + hyphens, deduplicate against
     # existing. On collision, suffix with a random hex token rather than
     # a monotonic counter so existence checks don't leak ordinal info
@@ -486,14 +524,14 @@ def setup(req: SetupRequest) -> dict:
 # ---------------------------------------------------------------------------
 
 @app.get("/conflicts")
-def conflicts(include_snoozed: bool = False, org_id: str = _OrgDep) -> list[dict]:
+def conflicts(include_snoozed: bool = False, org_id: str = _OrgDep, _admin=_AdminDep) -> list[dict]:
     """Unresolved drift conflicts. Pass ?include_snoozed=true to also list snoozed ones."""
     return get_unresolved_conflicts(include_snoozed=include_snoozed, org_id=org_id)
 
 
 @app.post("/conflicts/{conflict_id}/resolve")
 def resolve_conflict_endpoint(
-    conflict_id: str, req: ConflictResolveRequest, org_id: str = _OrgDep
+    conflict_id: str, req: ConflictResolveRequest, org_id: str = _OrgDep, _admin=_AdminDep
 ) -> dict:
     """Apply 'accept' | 'dismiss' | 'snooze' to a conflict."""
     if req.action not in {"accept", "dismiss", "snooze"}:
@@ -507,13 +545,13 @@ def resolve_conflict_endpoint(
 
 
 @app.get("/skills/{skill_id}/conflicts")
-def skill_conflicts(skill_id: str, org_id: str = _OrgDep) -> list[dict]:
+def skill_conflicts(skill_id: str, org_id: str = _OrgDep, _admin=_AdminDep) -> list[dict]:
     """Full conflict history for a single skill — any status."""
     return get_conflict_history(skill_id, org_id=org_id)
 
 
 @app.post("/skills/{skill_id}/review")
-def skill_mark_reviewed(skill_id: str, org_id: str = _OrgDep) -> dict:
+def skill_mark_reviewed(skill_id: str, org_id: str = _OrgDep, _admin=_AdminDep) -> dict:
     """Mark a skill as freshly reviewed — clears needs_review + bumps reviewed_at."""
     from brain.staleness import mark_as_reviewed
 
@@ -526,12 +564,8 @@ def skill_mark_reviewed(skill_id: str, org_id: str = _OrgDep) -> dict:
 # ---------------------------------------------------------------------------
 # Continuous ingestion: status, manual trigger, source CRUD (admin-only)
 # ---------------------------------------------------------------------------
-import os as _os  # noqa: E402
-
-from api.auth import verify_admin_token  # noqa: E402
-from fastapi import Depends as _Depends  # noqa: E402
-
-_AdminDep = _Depends(verify_admin_token)
+# _AdminDep is defined near _OrgDep further up; nothing additional to
+# wire here beyond the request models.
 
 
 class SourceCreate(BaseModel):
@@ -564,7 +598,7 @@ def _validate_source_config(source_type: str, config: dict) -> None:
 
 
 @app.get("/ingest/status")
-def ingest_status(org_id: str = _OrgDep) -> dict:
+def ingest_status(org_id: str = _OrgDep, _admin=_AdminDep) -> dict:
     """Last run summary (this org's) + next scheduled run + cadence."""
     from brain.scheduler import scheduler
 
@@ -588,7 +622,7 @@ def ingest_trigger(_admin=_AdminDep) -> dict:
 
 
 @app.get("/sources")
-def sources_list(org_id: str = _OrgDep) -> list[dict]:
+def sources_list(org_id: str = _OrgDep, _admin=_AdminDep) -> list[dict]:
     """Every connected source for this org. Tokens redacted in the config field."""
     return list_connected_sources(redact=True, org_id=org_id)
 

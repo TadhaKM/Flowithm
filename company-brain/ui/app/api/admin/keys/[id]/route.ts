@@ -1,7 +1,7 @@
 // Server-only proxy for DELETE /api/v1/keys/{id} (revoke).
 import { NextResponse } from "next/server";
 
-import { adminTokenMissing, orgHeaders } from "@/lib/org";
+import { MissingOrgSession, adminTokenMissing, orgHeaders, unauthorisedResponse } from "@/lib/org";
 
 const API_URL = (process.env.FLOWITHM_API_URL || "http://localhost:8000").replace(/\/$/, "");
 
@@ -33,6 +33,7 @@ export async function DELETE(
       headers: { "content-type": res.headers.get("content-type") || "application/json" },
     });
   } catch (err) {
+    if (err instanceof MissingOrgSession) return unauthorisedResponse();
     return NextResponse.json(
       { error: err instanceof Error ? err.message : String(err) },
       { status: 502 },
