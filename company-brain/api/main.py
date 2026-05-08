@@ -211,6 +211,13 @@ from api.agent import agent_app  # noqa: E402
 app.mount("/api/v1", agent_app)
 
 
+from fastapi.responses import RedirectResponse  # noqa: E402
+
+@app.get("/", include_in_schema=False)
+def root():
+    return RedirectResponse(url="/docs")
+
+
 # ---------------------------------------------------------------------------
 # Global exception handlers — every error returns the standard
 # {error, code, docs} envelope. Tracebacks land in the structured logger
