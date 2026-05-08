@@ -15,6 +15,17 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
+
+def _sign_value(value: Any) -> str:
+    """HMAC-sign a button value so handlers can verify it wasn't tampered."""
+    try:
+        from slack.sign import sign_action
+        return sign_action(value)
+    except Exception:
+        # If signing fails (no key configured), fall back to raw JSON.
+        return value if isinstance(value, str) else json.dumps(value)
+from typing import Any
+
 BOT_NAME = "Flowithm"
 
 
@@ -48,7 +59,7 @@ def build_confirmation_blocks(trigger_text: str, action_value: str) -> list[dict
                     "text": {"type": "plain_text", "text": "Extract workflow"},
                     "style": "primary",
                     "action_id": "extract_workflow",
-                    "value": action_value,
+                    "value": _sign_value(action_value),
                 },
                 {
                     "type": "button",
@@ -173,7 +184,7 @@ def build_workflow_response_blocks(
         "type": "button",
         "text": {"type": "plain_text", "text": "Copy skills file JSON"},
         "action_id": "copy_json",
-        "value": workflow_id,
+        "value": _sign_value(workflow_id),
     })
     if existing and existing.get("id") and str(existing.get("id")) != workflow_id:
         # H-5: sign the value blob so a workspace member can't edit the

@@ -4,7 +4,7 @@
 // linkability — /brain?source=slack works with refresh).
 import { NextResponse } from "next/server";
 
-import { getOrgId } from "@/lib/org";
+import { getOrgIdFromSession } from "@/lib/org";
 import { getSupabase } from "@/lib/supabase";
 
 const SOURCE_FILTERS = new Set(["slack", "notion", "manual", "github"]);
@@ -30,9 +30,9 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const source = url.searchParams.get("source") || "all";
 
-  const orgId = await getOrgId();
+  const orgId = await getOrgIdFromSession();
   if (!orgId) {
-    return NextResponse.json({ error: "No org context" }, { status: 400 });
+    return NextResponse.json({ error: "Not signed in" }, { status: 401 });
   }
   let query;
   try {

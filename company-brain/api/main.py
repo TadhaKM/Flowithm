@@ -187,8 +187,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[o for o in _origins if o],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["authorization", "content-type", "x-org-id", "x-admin-sig"],
 )
 
 # Mount the public Agent API sub-app at /api/v1. Sub-app gets its own
@@ -397,7 +397,7 @@ def get_demo(slug: str) -> str:
 
 
 @app.get("/health")
-def health() -> dict:
+def health(request: Request) -> dict:
     """Real health probe — exercises every external dependency just enough
     to know whether it's reachable, then returns a per-component status
     map. Existing `chunks_indexed` field preserved for backward compat
@@ -457,11 +457,26 @@ def health() -> dict:
     string_values = [v for v in checks.values() if isinstance(v, str)]
     overall = "ok" if all(v in ("ok", "closed") for v in string_values) else "degraded"
 
+    # L-2: redact error details for unauthenticated callers so internal
+    # hostnames and PostgREST errors aren't exposed via the public probe.
+    is_admin = False
+    try:
+        admin_token = os.environ.get("ADMIN_TOKEN", "").strip()
+        auth_header = request.headers.get("authorization") or ""
+        if admin_token and auth_header.startswith("Bearer "):
+            import hmac as _hmac
+            is_admin = _hmac.compare_digest(auth_header[7:], admin_token)
+    except Exception:
+        pass
+    if not is_admin:
+        for k, v in checks.items():
+            if isinstance(v, str) and v.startswith("error"):
+                checks[k] = "error"
+
     return {
         "status": overall,
         "checks": checks,
         "version": os.environ.get("APP_VERSION", "dev"),
-        # Backward-compat: callers probing the old shape still see this.
         "chunks_indexed": _cached_chunk_count(),
     }
 

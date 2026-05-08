@@ -19,6 +19,21 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
   }
 
+  // M-NEW-1: reject if this user already has an org (prevent unbounded
+  // org creation from a single authenticated account).
+  const svcEarly = getSupabase();
+  const { data: existingLink } = await svcEarly
+    .from("users")
+    .select("id")
+    .eq("id", user.id)
+    .limit(1);
+  if (existingLink && existingLink.length > 0) {
+    return NextResponse.json(
+      { error: "Account already linked to an organisation" },
+      { status: 409 },
+    );
+  }
+
   const payload = await request.json().catch(() => ({}));
   const companyName = (payload.company_name || "").trim();
   const displayName = (payload.display_name || "").trim();

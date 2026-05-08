@@ -31,6 +31,10 @@ KEY_PREFIX_LEN = 12
 RATE_LIMIT_PER_MINUTE = 100
 SLOW_REQUEST_THRESHOLD_MS = 1000
 
+# M-4: constant-time decoy for empty-prefix case — prevents timing oracle
+# that reveals whether a key prefix exists.
+_DUMMY_HASH = bcrypt.hashpw(b"decoy", bcrypt.gensalt()).decode()
+
 # Sliding-window in-memory limiter. Process-local; resets on restart.
 # Acceptable for single-process deployments. For multi-worker or HA,
 # swap for Redis with INCR + EXPIRE.
@@ -135,6 +139,9 @@ def verify_api_key(
     prefix = token[:KEY_PREFIX_LEN]
     candidates = find_api_keys_by_prefix(prefix)
     if not candidates:
+        # M-4: run a decoy bcrypt so the 401 timing is indistinguishable
+        # from a real prefix with a hash mismatch.
+        _bcrypt_verify(token, _DUMMY_HASH)
         raise _err(401, "INVALID_API_KEY", "Invalid API key.")
 
     matched = None
@@ -211,6 +218,39 @@ def verify_admin_token(request: Request) -> None:
     token = _extract_bearer(request.headers.get("authorization"))
     if not _constant_time_eq(token, expected):
         raise _err(401, "INVALID_API_KEY", "Invalid admin token.")
+
+    # H-NEW-2: verify the HMAC signature on X-Org-ID so a leaked ADMIN_TOKEN
+    # can't target arbitrary tenants via raw curl. The dashboard proxy signs
+    # org_id:timestamp with the ADMIN_TOKEN as key.
+    org_id = request.headers.get("x-org-id") or ""
+    admin_sig = request.headers.get("x-admin-sig") or ""
+    if org_id and admin_sig:
+        _verify_admin_sig(org_id, admin_sig, expected)
+
+
+def _verify_admin_sig(org_id: str, sig_header: str, key: str) -> None:
+    """Verify X-Admin-Sig = 'timestamp:hmac_hex'. Reject if >5min old."""
+    import hmac as _hmac
+    import hashlib
+    parts = sig_header.split(":", 1)
+    if len(parts) != 2:
+        raise _err(401, "INVALID_API_KEY", "Malformed X-Admin-Sig.")
+    ts_str, sig_hex = parts
+    try:
+        ts = int(ts_str)
+    except ValueError:
+        raise _err(401, "INVALID_API_KEY", "Malformed X-Admin-Sig timestamp.")
+    # Reject signatures older than 5 minutes (replay window).
+    now = int(time.time())
+    if abs(now - ts) > 300:
+        raise _err(401, "INVALID_API_KEY", "X-Admin-Sig expired.")
+    expected_sig = _hmac.new(
+        key.encode("utf-8"),
+        f"{org_id}:{ts_str}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    if not _hmac.compare_digest(sig_hex, expected_sig):
+        raise _err(401, "INVALID_API_KEY", "X-Admin-Sig mismatch.")
 
 
 def _constant_time_eq(a: str, b: str) -> bool:

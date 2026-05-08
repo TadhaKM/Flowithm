@@ -11,6 +11,7 @@
 // Usage in a route handler:
 //   const headers = await orgHeaders({ admin: true });
 //   const res = await fetch(API + "/sources", { headers, ... });
+import crypto from "crypto";
 import { NextResponse } from "next/server";
 import { createClient as createAuthClient } from "./supabase-server";
 import { getSupabase } from "./supabase";
@@ -67,7 +68,20 @@ export async function orgHeaders(opts?: { admin?: boolean; json?: boolean }): Pr
     const org = await getOrgId();
     if (org) headers["X-Org-ID"] = org;
   }
-  if (opts?.admin && ADMIN_TOKEN) headers["Authorization"] = `Bearer ${ADMIN_TOKEN}`;
+  if (opts?.admin && ADMIN_TOKEN) {
+    headers["Authorization"] = `Bearer ${ADMIN_TOKEN}`;
+    // H-NEW-2: HMAC-sign org_id + timestamp so FastAPI can verify the
+    // caller is the dashboard proxy (knows the key) and the org_id hasn't
+    // been tampered with. Prevents a leaked ADMIN_TOKEN from targeting
+    // arbitrary tenants via raw curl.
+    const orgForSig = headers["X-Org-ID"] || "";
+    const ts = Math.floor(Date.now() / 1000).toString();
+    const sig = crypto
+      .createHmac("sha256", ADMIN_TOKEN)
+      .update(`${orgForSig}:${ts}`)
+      .digest("hex");
+    headers["X-Admin-Sig"] = `${ts}:${sig}`;
+  }
   if (opts?.json) headers["content-type"] = "application/json";
   return headers;
 }

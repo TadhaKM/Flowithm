@@ -173,10 +173,10 @@ def register(app: App) -> None:
     @app.action("extract_workflow")
     def on_extract(ack, body, client: WebClient):
         ack()
-        try:
-            value = json.loads(body["actions"][0]["value"])
-        except Exception as exc:
-            print(f"[extract] bad button value: {exc}", flush=True)
+        from slack.sign import verify_action
+        value = verify_action((body.get("actions") or [{}])[0].get("value"))
+        if not isinstance(value, dict):
+            print("[extract] unsigned or tampered button value", flush=True)
             return
         _SLACK_POOL.submit(
             _extract_workflow_async,
@@ -209,7 +209,10 @@ def register(app: App) -> None:
     @app.action("copy_json")
     def on_copy_json(ack, body, client: WebClient):
         ack()
-        workflow_id = (body.get("actions") or [{}])[0].get("value") or ""
+        from slack.sign import verify_action
+        raw = (body.get("actions") or [{}])[0].get("value") or ""
+        verified = verify_action(raw)
+        workflow_id = verified if isinstance(verified, str) else str(verified or raw)
         _SLACK_POOL.submit(
             _post_json_snippet,
             client=client,

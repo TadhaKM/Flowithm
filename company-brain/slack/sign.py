@@ -13,8 +13,8 @@ char value limit), URL-safe, no external deps.
 
 Signing key is `FLOWITHM_ACTION_SECRET` if set, otherwise `ADMIN_TOKEN`
 (already required for the FastAPI admin gate, so no new env required).
-TODO: add a TTL by stamping `iat` into the payload and rejecting >24h
-old blobs.
+L-4: `iat` is now stamped into the payload and blobs older than 24h are
+rejected.
 """
 from __future__ import annotations
 
@@ -23,7 +23,10 @@ import hashlib
 import hmac
 import json
 import os
+import time
 from typing import Any
+
+ACTION_TTL_SECONDS = 86400  # 24 hours
 
 
 def _key() -> bytes:
@@ -53,8 +56,11 @@ def _b64decode(s: str) -> bytes:
 
 
 def sign_action(payload: Any) -> str:
-    """Return a signed-blob suitable for the Slack button `value` field."""
-    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    """Return a signed-blob suitable for the Slack button `value` field.
+    Stamps iat (issued-at) into the payload for TTL enforcement on verify."""
+    # Wrap the payload with an iat timestamp for TTL.
+    wrapped = {"p": payload, "iat": int(time.time())}
+    body = json.dumps(wrapped, separators=(",", ":")).encode("utf-8")
     sig = hmac.new(_key(), body, hashlib.sha256).digest()
     return f"{_b64(body)}.{_b64(sig)}"
 
@@ -70,6 +76,13 @@ def verify_action(blob: str | None) -> Any | None:
         expected = hmac.new(_key(), body, hashlib.sha256).digest()
         if not hmac.compare_digest(sig, expected):
             return None
-        return json.loads(body)
+        parsed = json.loads(body)
+        # L-4: reject blobs older than ACTION_TTL_SECONDS.
+        if isinstance(parsed, dict) and "iat" in parsed:
+            if time.time() - parsed["iat"] > ACTION_TTL_SECONDS:
+                return None
+            return parsed.get("p")
+        # Backward compat: blobs signed before the TTL change have no iat.
+        return parsed
     except Exception:
         return None

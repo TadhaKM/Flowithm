@@ -2,7 +2,7 @@
 // PATCH  /api/brain/[id] — update one of: process_name, reviewed_at, archived.
 import { NextResponse } from "next/server";
 
-import { getOrgId } from "@/lib/org";
+import { getOrgIdFromSession } from "@/lib/org";
 import { getSupabase } from "@/lib/supabase";
 
 type RouteContext = { params: Promise<{ id: string }> };
@@ -49,9 +49,9 @@ function rowToWorkflow(r: SkillRow) {
 
 export async function GET(_request: Request, ctx: RouteContext) {
   const { id } = await ctx.params;
-  const orgId = await getOrgId();
+  const orgId = await getOrgIdFromSession();
   if (!orgId) {
-    return NextResponse.json({ error: "No org context" }, { status: 400 });
+    return NextResponse.json({ error: "Not signed in" }, { status: 401 });
   }
   let q = getSupabase()
     .from("skills")
@@ -98,9 +98,9 @@ export async function PATCH(request: Request, ctx: RouteContext) {
     );
   }
 
-  const orgId = await getOrgId();
+  const orgId = await getOrgIdFromSession();
   if (!orgId) {
-    return NextResponse.json({ error: "No org context" }, { status: 400 });
+    return NextResponse.json({ error: "Not signed in" }, { status: 401 });
   }
   let q2 = getSupabase()
     .from("skills")

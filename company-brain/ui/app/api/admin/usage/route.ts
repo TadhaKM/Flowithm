@@ -119,6 +119,7 @@ export async function GET(request: Request) {
       .from("skills")
       .select("id,process_name")
       .eq("id", topId)
+      .eq("org_id", orgId)
       .single();
     most_queried_process = {
       id: topId,
