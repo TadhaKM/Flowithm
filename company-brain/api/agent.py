@@ -22,7 +22,7 @@ from api.auth import (
     KEY_PREFIX_LEN,
     log_match_request,
 )
-from brain.embedder import get_embedding
+from brain.embedder import embed_query
 from brain.store import (
     deactivate_api_key,
     find_similar_workflow,
@@ -50,6 +50,45 @@ agent_app = FastAPI(
     docs_url="/docs",
     openapi_url="/openapi.json",
 )
+
+
+# ---------------------------------------------------------------------------
+# Exception handlers — sub-apps don't inherit the parent app's handlers so
+# we register our own to ensure clean {error, code, docs} envelopes instead
+# of FastAPI's default plain-text "Internal Server Error".
+# ---------------------------------------------------------------------------
+
+from fastapi import Request as _Request  # noqa: E402 (local to avoid circular)
+from fastapi.responses import JSONResponse as _JSONResponse  # noqa: E402
+from fastapi.exceptions import RequestValidationError as _RVE  # noqa: E402
+
+
+@agent_app.exception_handler(HTTPException)
+async def _agent_http_exc(request: _Request, exc: HTTPException):
+    detail = exc.detail
+    if isinstance(detail, dict) and "error" in detail and "code" in detail:
+        body = detail
+    else:
+        body = {"error": str(detail) if detail else "Error", "code": "INTERNAL_ERROR", "docs": DOCS_URL}
+    return _JSONResponse(status_code=exc.status_code, content=body, headers=getattr(exc, "headers", None))
+
+
+@agent_app.exception_handler(_RVE)
+async def _agent_validation_exc(request: _Request, exc: _RVE):
+    return _JSONResponse(
+        status_code=422,
+        content={"error": "Invalid request", "code": "INVALID_REQUEST", "docs": DOCS_URL, "details": exc.errors()},
+    )
+
+
+@agent_app.exception_handler(Exception)
+async def _agent_unhandled_exc(request: _Request, exc: Exception):
+    import logging
+    logging.getLogger("flowithm.agent").error("unhandled exception", exc_info=True)
+    return _JSONResponse(
+        status_code=500,
+        content={"error": "Internal server error", "code": "INTERNAL_ERROR", "docs": DOCS_URL},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -305,9 +344,11 @@ def match_skill_endpoint(
     started = time.perf_counter()
     org_id = getattr(request.state, "org_id", None) or None
     try:
-        embedding = get_embedding(q)
+        embedding = embed_query(q)
     except ValueError:
         raise _err(400, "INVALID_REQUEST", "Query text is empty.")
+    except Exception as exc:
+        raise _err(503, "EMBEDDING_UNAVAILABLE", f"Embedding service error: {exc}")
 
     matches = match_skills_by_embedding(embedding, k=3, org_id=org_id)
     if not matches:

@@ -519,7 +519,7 @@ returns table (
     similarity          float
 )
 language plpgsql
-stable
+volatile
 as $$
 begin
     -- P-6: bump probes from default 1 → 10 so IVFFlat scans ~10% of
@@ -811,7 +811,7 @@ returns table (
     similarity  float
 )
 language plpgsql
-stable
+volatile
 as $$
 begin
     set local ivfflat.probes = 10;
