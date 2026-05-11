@@ -5,8 +5,8 @@
 // /api/admin/* server routes that inject ADMIN_TOKEN; nothing sensitive
 // reaches the browser bundle.
 
-import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import { TopNav } from "@/components/TopNav";
 
 type ApiKey = {
   id: string;
@@ -102,26 +102,7 @@ export default function ApiDashboardPage() {
   return (
     <main className="min-h-screen">
       <div className="max-w-7xl mx-auto px-6 py-8">
-        <header className="mb-12 flex items-center justify-between gap-4">
-          <div className="flex items-center gap-6">
-            <Link
-              href="/"
-              className="text-base font-medium tracking-tight text-zinc-100 hover:text-zinc-300 transition-colors"
-            >
-              Flowithm
-            </Link>
-            <Link
-              href="/brain"
-              className="text-sm text-zinc-500 hover:text-zinc-300 transition-colors"
-            >
-              Knowledge base
-            </Link>
-            <span className="text-sm text-zinc-100 font-medium">Agent API</span>
-          </div>
-          <p className="hidden text-sm text-zinc-500 sm:block">
-            The runtime memory layer your agents query
-          </p>
-        </header>
+        <TopNav />
 
         <div className="mb-8">
           <h2 className="text-2xl font-medium tracking-tight text-zinc-100">

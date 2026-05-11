@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { TopNav } from "@/components/TopNav";
 
 const API_URL = "";
 
@@ -153,23 +154,8 @@ export default function Home() {
     <main className="min-h-screen">
       <div className="max-w-6xl mx-auto px-6 py-8">
         <header className="mb-12">
-          <div className="flex items-center justify-between gap-4">
-            <div className="flex items-center gap-6">
-              <h1 className="text-base font-medium tracking-tight text-zinc-100">
-                Flowithm
-              </h1>
-              <Link
-                href="/brain"
-                className="text-sm text-zinc-400 hover:text-zinc-100 transition-colors"
-              >
-                Knowledge base
-              </Link>
-            </div>
-            <p className="text-sm text-zinc-400 hidden sm:block">
-              Turn company knowledge into systems AI can run
-            </p>
-          </div>
-          <p className="mt-3 max-w-2xl text-sm text-zinc-500">
+          <TopNav />
+          <p className="max-w-2xl text-sm text-zinc-500">
             Most company knowledge lives in Slack, docs, and memory. Flowithm
             turns it into structured workflows.
           </p>

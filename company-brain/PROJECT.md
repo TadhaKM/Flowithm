@@ -130,6 +130,8 @@ same thread when conflicts are found. Uses `FLOWITHM_URL` /
 The dashboard is a Next.js 16 App Router project with Tailwind v3.
 Brand colour `#1D9E75` (teal); dark theme using zinc neutrals.
 
+All four primary routes (`/`, `/brain`, `/brain/api`, `/brain/sources`) render the shared `components/TopNav` so users can hop between them from any page. The current route renders as a non-clickable highlighted span; the rest are Links. `usePathname()` decides which is active.
+
 | Route | Purpose |
 |---|---|
 | `/` | Workflow generator. Paste source material, name it, click Generate → calls `/workflows/generate`. Two-panel output (workflow + skills file JSON). Recent workflows row at the bottom with *Clear all*. |

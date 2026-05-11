@@ -9,6 +9,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase-browser";
+import { TopNav } from "@/components/TopNav";
 
 type WorkflowStep = {
   step: number;
@@ -324,47 +325,7 @@ export default function BrainPage() {
 // --------------------------------------------------------------------------
 
 function BrainHeader() {
-  const router = useRouter();
-
-  async function signOut() {
-    const supabase = createClient();
-    await supabase.auth.signOut();
-    router.push("/login");
-  }
-
-  return (
-    <header className="mb-12 flex items-center justify-between gap-4">
-      <div className="flex items-center gap-6">
-        <Link
-          href="/"
-          className="text-base font-medium tracking-tight text-zinc-100 hover:text-zinc-300 transition-colors"
-        >
-          Flowithm
-        </Link>
-        <span className="text-sm text-zinc-100 font-medium">
-          Knowledge base
-        </span>
-        <Link
-          href="/brain/api"
-          className="text-sm text-zinc-500 hover:text-zinc-300 transition-colors"
-        >
-          Agent API
-        </Link>
-        <Link
-          href="/brain/sources"
-          className="text-sm text-zinc-500 hover:text-zinc-300 transition-colors"
-        >
-          Sources
-        </Link>
-      </div>
-      <button
-        onClick={signOut}
-        className="text-sm text-zinc-500 hover:text-zinc-300 transition-colors"
-      >
-        Sign out
-      </button>
-    </header>
-  );
+  return <TopNav />;
 }
 
 // --------------------------------------------------------------------------

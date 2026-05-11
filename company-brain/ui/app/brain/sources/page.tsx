@@ -7,6 +7,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { TopNav } from "@/components/TopNav";
 
 type Source = {
   id: string;
@@ -126,23 +127,7 @@ export default function SourcesPage() {
   return (
     <main className="min-h-screen">
       <div className="max-w-7xl mx-auto px-6 py-8">
-        <header className="mb-12 flex items-center justify-between gap-4">
-          <div className="flex items-center gap-6">
-            <Link href="/" className="text-base font-medium tracking-tight text-zinc-100 hover:text-zinc-300 transition-colors">
-              Flowithm
-            </Link>
-            <Link href="/brain" className="text-sm text-zinc-500 hover:text-zinc-300 transition-colors">
-              Knowledge base
-            </Link>
-            <Link href="/brain/api" className="text-sm text-zinc-500 hover:text-zinc-300 transition-colors">
-              Agent API
-            </Link>
-            <span className="text-sm text-zinc-100 font-medium">Sources</span>
-          </div>
-          <p className="hidden text-sm text-zinc-500 sm:block">
-            Continuous ingestion from your tools
-          </p>
-        </header>
+        <TopNav />
 
         <div className="mb-8">
           <h2 className="text-2xl font-medium tracking-tight text-zinc-100">Connected sources</h2>
