@@ -50,6 +50,7 @@ company-brain/
 ├── ui/              Next.js dashboard (App Router, Tailwind, dark theme)
 ├── tests/           pytest suite (118 tests, no live services required)
 ├── demo-data/       Sample source material for the offline demo path
+├── demo/            Runnable demos — agent_demo.py exercises the public agent API
 ├── PROJECT.md       This file
 ├── README.md        Setup + usage walkthrough
 ├── DEPLOYMENT.md    Railway + Vercel + Supabase deploy guide
@@ -286,6 +287,12 @@ Mounted at `/api/v1`. Bearer-token auth on every endpoint. Standard
 Rate limit: 100 req/min per key, sliding window, in-memory.
 `x-flowithm-elapsed-ms` not yet emitted (the dashboard's playground
 proxy times round-trip itself).
+
+`demo/agent_demo.py` is a runnable end-to-end demo: a Claude agent
+(`claude-opus-4-7`, adaptive thinking) handles three Loopline customer-support
+refund scenarios, calling `GET /api/v1/skills/match` as a tool before every
+decision. Reads `ANTHROPIC_API_KEY`, `FLOWBRAIN_API_URL`, `FLOWBRAIN_API_KEY`
+from `.env`. Run with `python demo/agent_demo.py`.
 
 ### Error codes
 
