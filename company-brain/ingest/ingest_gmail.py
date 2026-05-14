@@ -44,6 +44,37 @@ class GmailIngestor(BaseIngestor):
         self._source_id = source_id
         self._org_id = org_id
 
+    def validate_connection(self) -> dict[str, Any]:
+        """Confirm the stored OAuth credentials still work by performing a
+        token refresh. Returns {"valid": bool, "error": str | None}."""
+        if not self.credentials_json:
+            return {"valid": False, "error": "No credentials JSON provided."}
+        try:
+            import json as _json
+
+            from google.auth.transport.requests import Request  # type: ignore[import-not-found]
+            from google.oauth2.credentials import Credentials  # type: ignore[import-not-found]
+        except ImportError:
+            return {"valid": False, "error": "google-auth libraries are not installed on the server."}
+        try:
+            creds_dict = _json.loads(self.credentials_json)
+        except (ValueError, TypeError) as exc:
+            return {"valid": False, "error": f"Credentials JSON is not valid JSON: {exc}"}
+        try:
+            creds = Credentials.from_authorized_user_info(creds_dict)
+        except Exception as exc:
+            return {"valid": False, "error": f"Credentials JSON is missing required fields: {exc}"}
+        try:
+            creds.refresh(Request())
+        except Exception as exc:
+            return {
+                "valid": False,
+                "error": f"Token expired or revoked — re-run gmail_auth: {exc}",
+            }
+        if creds.valid:
+            return {"valid": True, "error": None}
+        return {"valid": False, "error": "Gmail credentials could not be validated."}
+
     def build_chunks(self, raw_data: Any = None) -> list[Chunk]:
         if not self.credentials_json or not self.label_filters:
             return []

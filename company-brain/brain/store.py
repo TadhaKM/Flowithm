@@ -615,6 +615,30 @@ def update_source_last_synced(source_id: str, when_iso: str, org_id: str | None 
     q.execute()
 
 
+def update_source_validation(
+    source_id: str,
+    status: str,
+    error: str | None,
+    when_iso: str,
+    org_id: str | None = None,
+) -> None:
+    """Persist the result of a "test connection" check. Touches only the
+    validation columns — never the encrypted config."""
+    client = get_client()
+    q = (
+        client.table("connected_sources")
+        .update({
+            "last_validated_at": when_iso,
+            "last_validation_status": status,
+            "last_validation_error": error,
+        })
+        .eq("id", source_id)
+    )
+    if org_id:
+        q = q.eq("org_id", org_id)
+    q.execute()
+
+
 def insert_ingest_run(summary: dict[str, Any], org_id: str | None = None) -> str:
     """Persist one scheduled or manual run. errors is stored as jsonb."""
     client = get_client()

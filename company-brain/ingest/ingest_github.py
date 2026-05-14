@@ -7,6 +7,7 @@ import json
 import sys
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 from brain.ingestors import BaseIngestor, Chunk
 from brain.text_utils import cap_tokens
@@ -33,6 +34,37 @@ def format_issue(issue: dict) -> str:
 
 
 class GitHubIngestor(BaseIngestor):
+    def __init__(self, token: str | None = None) -> None:
+        # token is only used by validate_connection() — the demo build_chunks
+        # path reads from a static JSON export and needs no auth.
+        self.token = token
+
+    def validate_connection(self) -> dict[str, Any]:
+        """One cheap GET /user call to confirm the token works.
+        Returns {"valid": bool, "error": str | None}."""
+        if not self.token:
+            return {"valid": False, "error": "No token provided."}
+        import requests
+
+        try:
+            resp = requests.get(
+                "https://api.github.com/user",
+                headers={
+                    "Authorization": f"Bearer {self.token}",
+                    "Accept": "application/vnd.github+json",
+                },
+                timeout=10,
+            )
+        except requests.RequestException as exc:
+            return {"valid": False, "error": f"Could not reach GitHub: {exc}"}
+        if resp.status_code == 200:
+            return {"valid": True, "error": None}
+        if resp.status_code == 401:
+            return {"valid": False, "error": "Invalid or revoked GitHub token."}
+        if resp.status_code == 403:
+            return {"valid": False, "error": "GitHub token is rate-limited or lacks scope."}
+        return {"valid": False, "error": f"GitHub returned HTTP {resp.status_code}."}
+
     def build_chunks(self, issues: list[dict]) -> list[Chunk]:
         chunks: list[Chunk] = []
         for issue in issues:

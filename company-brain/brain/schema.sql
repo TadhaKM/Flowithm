@@ -373,6 +373,13 @@ create table if not exists connected_sources (
 );
 create index if not exists connected_sources_active_idx on connected_sources (is_active);
 
+-- Connection validation: result of the last "test connection" check, so the
+-- dashboard can show "Last verified: 2h ago" without re-hitting the provider.
+-- last_validation_status is 'valid' | 'invalid' (null = never checked).
+alter table connected_sources add column if not exists last_validated_at      timestamptz;
+alter table connected_sources add column if not exists last_validation_status text;
+alter table connected_sources add column if not exists last_validation_error  text;
+
 -- ingest_runs is the per-cycle audit log — same shape as the dict the
 -- scheduler builds in run_ingest_cycle(), one row per scheduled or manual
 -- trigger. errors is a jsonb array of "{source}: {message}" strings.

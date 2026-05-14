@@ -49,6 +49,25 @@ class IntercomIngestor(BaseIngestor):
         self.tags = tags or None
         self.min_message_count = max(1, int(min_message_count))
 
+    def validate_connection(self) -> dict[str, Any]:
+        """One cheap GET /me call to confirm the access token works.
+        Returns {"valid": bool, "error": str | None}."""
+        if not self.token:
+            return {"valid": False, "error": "No access token provided."}
+        import requests
+
+        try:
+            resp = requests.get(
+                f"{INTERCOM_BASE}/me", headers=self._headers(), timeout=10
+            )
+        except requests.RequestException as exc:
+            return {"valid": False, "error": f"Could not reach Intercom: {exc}"}
+        if resp.status_code == 200:
+            return {"valid": True, "error": None}
+        if resp.status_code in (401, 403):
+            return {"valid": False, "error": "Invalid or revoked access token."}
+        return {"valid": False, "error": f"Intercom returned HTTP {resp.status_code}."}
+
     def build_chunks(self, raw_data: Any = None) -> list[Chunk]:
         if not self.token:
             return []

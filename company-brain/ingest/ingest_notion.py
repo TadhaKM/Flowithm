@@ -75,6 +75,32 @@ class NotionIngestor(BaseIngestor):
         self.page_ids = page_ids or []
         self.since = since
 
+    def validate_connection(self) -> dict[str, Any]:
+        """One cheap GET /users/me call to confirm the integration token works.
+        Returns {"valid": bool, "error": str | None}."""
+        if not self.token:
+            return {"valid": False, "error": "No integration token provided."}
+        import requests
+
+        try:
+            resp = requests.get(
+                f"{NOTION_API}/users/me",
+                headers={
+                    "Authorization": f"Bearer {self.token}",
+                    "Notion-Version": NOTION_VERSION,
+                },
+                timeout=10,
+            )
+        except requests.RequestException as exc:
+            return {"valid": False, "error": f"Could not reach Notion: {exc}"}
+        if resp.status_code == 200:
+            return {"valid": True, "error": None}
+        if resp.status_code == 401:
+            return {"valid": False, "error": "Invalid or revoked integration token."}
+        if resp.status_code == 403:
+            return {"valid": False, "error": "Token lacks the required Notion permissions."}
+        return {"valid": False, "error": f"Notion returned HTTP {resp.status_code}."}
+
     def build_chunks(self, text: str | None) -> list[Chunk]:
         if text is None:
             # Live mode: fetch + concatenate every page's markdown into one

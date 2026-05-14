@@ -18,7 +18,12 @@ type Source = {
   next_sync_at: string | null;
   is_active: boolean;
   created_at: string | null;
+  last_validated_at: string | null;
+  last_validation_status: "valid" | "invalid" | null;
+  last_validation_error: string | null;
 };
+
+type ValidateResult = { valid: boolean; error: string | null; validated_at?: string };
 
 type IngestStatus = {
   last_run: {
@@ -294,6 +299,8 @@ function SourceCard({
 }) {
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [pending, setPending] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [result, setResult] = useState<ValidateResult | null>(null);
 
   useEffect(() => {
     if (!confirmRemove) return;
@@ -315,6 +322,36 @@ function SourceCard({
       setConfirmRemove(false);
     }
   }
+
+  async function testConnection() {
+    if (testing) return;
+    setTesting(true);
+    try {
+      const res = await fetch(`/api/admin/sources/${source.id}/validate`, { method: "POST" });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body?.error || `HTTP ${res.status}`);
+      setResult({ valid: !!body.valid, error: body.error ?? null, validated_at: body.validated_at });
+    } catch (e) {
+      setResult({
+        valid: false,
+        error: e instanceof Error ? e.message : String(e),
+        validated_at: new Date().toISOString(),
+      });
+    } finally {
+      setTesting(false);
+    }
+  }
+
+  // Prefer the just-tested result; fall back to the persisted last check.
+  const shown: { valid: boolean; error: string | null; at: string | null } | null = result
+    ? { valid: result.valid, error: result.error, at: result.validated_at ?? null }
+    : source.last_validation_status
+      ? {
+          valid: source.last_validation_status === "valid",
+          error: source.last_validation_error,
+          at: source.last_validated_at,
+        }
+      : null;
 
   return (
     <article className={`rounded-xl border border-zinc-800 bg-zinc-900/40 p-4 transition-opacity ${source.is_active ? "" : "opacity-60"}`}>
@@ -343,7 +380,35 @@ function SourceCard({
 
       <SourceConfigPreview type={source.source_type} config={source.config} />
 
-      <div className="mt-3 flex justify-end">
+      <div className="mt-3 border-t border-zinc-800/80 pt-3">
+        {shown === null ? (
+          <p className="text-xs text-zinc-500">Not verified yet.</p>
+        ) : shown.valid ? (
+          <p className="text-xs text-emerald-300">
+            <span aria-hidden>✓</span> Connected
+            {shown.at && (
+              <span className="text-zinc-500"> · Last verified {relativeTime(shown.at)}</span>
+            )}
+          </p>
+        ) : (
+          <div className="text-xs text-red-300">
+            <span aria-hidden>✗</span> Invalid credentials
+            {shown.at && (
+              <span className="text-zinc-500"> · checked {relativeTime(shown.at)}</span>
+            )}
+            {shown.error && <p className="mt-0.5 break-all text-red-300/80">{shown.error}</p>}
+          </div>
+        )}
+      </div>
+
+      <div className="mt-3 flex items-center justify-between">
+        <button
+          onClick={testConnection}
+          disabled={testing}
+          className="text-xs text-zinc-300 hover:text-zinc-100 disabled:opacity-50 transition-colors"
+        >
+          {testing ? "Testing…" : "Test connection"}
+        </button>
         <button
           onClick={clickRemove}
           disabled={pending}
@@ -442,6 +507,17 @@ function AddSourceModal({
   const [minMsgCount, setMinMsgCount] = useState<number>(3); // intercom min_message_count
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Connection validation must pass before the source can be saved.
+  const [validation, setValidation] = useState<{
+    status: "idle" | "testing" | "valid" | "invalid";
+    error: string | null;
+  }>({ status: "idle", error: null });
+
+  // Any change to the credentials/config invalidates a prior test result.
+  // (display name is excluded — it doesn't affect the connection.)
+  useEffect(() => {
+    setValidation({ status: "idle", error: null });
+  }, [sourceType, token, idsText, credsJson, labelsText, tagsText, minMsgCount]);
 
   function commaList(s: string): string[] {
     return s.split(",").map((x) => x.trim()).filter(Boolean);
@@ -493,6 +569,58 @@ function AddSourceModal({
     if (!token.trim()) missing.push("token");
     const ids = commaList(idsText);
     return { config: { token: token.trim(), ids }, missing };
+  }
+
+  // Which credential field must be present before a connection test makes
+  // sense — distinct from buildConfig's `missing`, which also covers display
+  // name and channel/page ids that the test itself doesn't need.
+  function credentialMissing(): string | null {
+    if (sourceType === "gmail") {
+      if (!credsJson.trim()) return "credentials JSON";
+      try {
+        JSON.parse(credsJson);
+      } catch {
+        return "valid JSON in the credentials field";
+      }
+      return null;
+    }
+    if (!token.trim()) {
+      return sourceType === "intercom"
+        ? "access token"
+        : sourceType === "notion"
+          ? "integration token"
+          : sourceType === "slack"
+            ? "bot token"
+            : "token";
+    }
+    return null;
+  }
+
+  async function testConnection() {
+    if (validation.status === "testing") return;
+    const missingCred = credentialMissing();
+    if (missingCred) {
+      setValidation({ status: "invalid", error: `Enter the ${missingCred} first.` });
+      return;
+    }
+    setValidation({ status: "testing", error: null });
+    const { config } = buildConfig();
+    try {
+      const res = await fetch("/api/admin/sources/validate", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ source_type: sourceType, config }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body?.error || `HTTP ${res.status}`);
+      if (body.valid) {
+        setValidation({ status: "valid", error: null });
+      } else {
+        setValidation({ status: "invalid", error: body.error || "Invalid credentials" });
+      }
+    } catch (e) {
+      setValidation({ status: "invalid", error: e instanceof Error ? e.message : String(e) });
+    }
   }
 
   async function submit() {
@@ -658,13 +786,37 @@ function AddSourceModal({
           </div>
         )}
 
+        {validation.status === "testing" && (
+          <div className="mt-3 rounded-md border border-zinc-700 bg-zinc-800/40 px-3 py-2 text-xs text-zinc-300">
+            Testing connection…
+          </div>
+        )}
+        {validation.status === "valid" && (
+          <div className="mt-3 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200">
+            <span aria-hidden>✓</span> Connected — credentials verified.
+          </div>
+        )}
+        {validation.status === "invalid" && (
+          <div className="mt-3 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+            <span aria-hidden>✗</span> {validation.error || "Invalid credentials"}
+          </div>
+        )}
+
         <div className="mt-5 flex items-center justify-end gap-2">
           <button onClick={onClose} className="px-3.5 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800 rounded-md transition-colors">
             Cancel
           </button>
           <button
+            onClick={testConnection}
+            disabled={validation.status === "testing"}
+            className="px-3.5 py-1.5 text-xs font-medium rounded-md border border-zinc-700 bg-zinc-900 text-zinc-200 hover:bg-zinc-800 disabled:opacity-50 transition-colors"
+          >
+            {validation.status === "testing" ? "Testing…" : "Test connection"}
+          </button>
+          <button
             onClick={submit}
-            disabled={pending}
+            disabled={pending || validation.status !== "valid"}
+            title={validation.status !== "valid" ? "Test the connection first" : undefined}
             className="px-3.5 py-1.5 text-xs font-medium rounded-md bg-[#1D9E75] text-white hover:bg-[#178c66] disabled:opacity-50 transition-colors"
           >
             {pending ? "Connecting…" : "Connect"}

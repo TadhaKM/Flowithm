@@ -25,6 +25,7 @@ if __package__ in (None, ""):
 import os
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -65,6 +66,7 @@ from brain.store import (
     list_connected_sources,
     list_workflows,
     update_connected_source,
+    update_source_validation,
 )
 
 load_dotenv()
@@ -643,6 +645,13 @@ class SourceUpdate(BaseModel):
     is_active: bool | None = None
 
 
+class ValidateSourceRequest(BaseModel):
+    # Pre-save validation from the Connect-source modal: there's no row yet,
+    # so the caller passes the source_type + config it's about to submit.
+    source_type: str
+    config: dict
+
+
 _REQUIRED_CONFIG_KEYS = {
     "slack":    {"bot_token", "channel_ids"},
     "notion":   {"integration_token", "page_ids"},
@@ -658,6 +667,41 @@ def _validate_source_config(source_type: str, config: dict) -> None:
     missing = [k for k in required if k not in config or config[k] in (None, "", [])]
     if missing:
         raise HTTPException(400, f"missing required config keys for {source_type}: {missing}")
+
+
+def _validate_source_connection(source_type: str, config: dict) -> dict:
+    """Build the matching ingestor and run its one-shot validate_connection()
+    against the live provider. Returns {"valid": bool, "error": str | None}."""
+    config = config or {}
+    try:
+        if source_type == "slack":
+            from ingest.ingest_slack import SlackIngestor
+
+            return SlackIngestor(
+                token=config.get("bot_token"),
+                channel_ids=config.get("channel_ids") or [],
+            ).validate_connection()
+        if source_type == "notion":
+            from ingest.ingest_notion import NotionIngestor
+
+            return NotionIngestor(token=config.get("integration_token")).validate_connection()
+        if source_type == "gmail":
+            from ingest.ingest_gmail import GmailIngestor
+
+            return GmailIngestor(
+                credentials_json=config.get("credentials_json"),
+            ).validate_connection()
+        if source_type == "intercom":
+            from ingest.ingest_intercom import IntercomIngestor
+
+            return IntercomIngestor(access_token=config.get("access_token")).validate_connection()
+        if source_type == "github":
+            from ingest.ingest_github import GitHubIngestor
+
+            return GitHubIngestor(token=config.get("token")).validate_connection()
+    except Exception as exc:  # never let a validator crash the request
+        return {"valid": False, "error": f"Validation failed: {exc}"}
+    return {"valid": False, "error": f"No connection validator for source type {source_type!r}."}
 
 
 @app.get("/ingest/status")
@@ -733,3 +777,37 @@ def sources_delete(source_id: str, org_id: str = _OrgDep, _admin=_AdminDep) -> d
     if not ok:
         raise HTTPException(404, f"source not found: {source_id}")
     return {"status": "ok", "deactivated": source_id}
+
+
+# IMPORTANT: declare /sources/validate BEFORE /sources/{source_id}/validate —
+# a static segment must win over the dynamic one.
+@app.post("/sources/validate")
+def sources_validate_config(
+    req: ValidateSourceRequest, org_id: str = _OrgDep, _admin=_AdminDep
+) -> dict:
+    """Pre-save validation for the Connect-source modal — no row exists yet,
+    so the caller passes the source_type + config directly. Result is not
+    persisted (there's nothing to persist it to)."""
+    if req.source_type not in {"slack", "notion", "github", "gmail", "intercom"}:
+        raise HTTPException(400, f"unsupported source_type: {req.source_type}")
+    return _validate_source_connection(req.source_type, req.config)
+
+
+@app.post("/sources/{source_id}/validate")
+def sources_validate(source_id: str, org_id: str = _OrgDep, _admin=_AdminDep) -> dict:
+    """Test an existing source's stored credentials against the live provider.
+    Persists the result to last_validated_at / last_validation_status so the
+    dashboard can show "Last verified: 2h ago" without re-checking."""
+    existing = get_connected_source(source_id, org_id=org_id)
+    if not existing:
+        raise HTTPException(404, f"source not found: {source_id}")
+    result = _validate_source_connection(existing["source_type"], existing.get("config") or {})
+    when = datetime.now(timezone.utc).isoformat()
+    update_source_validation(
+        source_id,
+        status="valid" if result.get("valid") else "invalid",
+        error=result.get("error"),
+        when_iso=when,
+        org_id=org_id,
+    )
+    return {**result, "validated_at": when}

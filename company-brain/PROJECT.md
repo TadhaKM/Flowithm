@@ -110,7 +110,7 @@ args for the demo path, and accepts source-specific live-mode params
 
 | Module | Purpose |
 |---|---|
-| `main.py` | Internal FastAPI app. Lifespan starts/stops the scheduler. Routes for `/query`, `/skills`, `/workflows/{generate,similar,id,id/archive}`, `/history`, `/conflicts`, `/skills/{id}/conflicts`, `/skills/{id}/review`, `/ingest/{status,trigger}`, `/sources` CRUD, `/demo/{slug}`, `/health`. |
+| `main.py` | Internal FastAPI app. Lifespan starts/stops the scheduler. Routes for `/query`, `/skills`, `/workflows/{generate,similar,id,id/archive}`, `/history`, `/conflicts`, `/skills/{id}/conflicts`, `/skills/{id}/review`, `/ingest/{status,trigger}`, `/sources` CRUD, `/sources/validate` + `/sources/{id}/validate` (connection checks), `/demo/{slug}`, `/health`. |
 | `agent.py` | Public agent API mounted at `/api/v1`. Sub-app with its own OpenAPI at `/api/v1/openapi.json` and Swagger UI at `/api/v1/docs`. Endpoints: `POST/GET /keys`, `DELETE /keys/{id}` (admin-gated), `GET /skills`, `GET /skills/{name}`, `GET /skills/match`, `POST /skills/execute`. Standard `{error, code, docs}` envelope on every error. Sub-app registers its own exception handlers (HTTPException, RequestValidationError, Exception) so errors don't fall through to FastAPI's default plain-text handler. `/skills/match` uses `embed_query` (Voyage `input_type=query`) for proper asymmetric retrieval. |
 | `auth.py` | `verify_api_key` FastAPI dependency: Bearer extraction → prefix-indexed candidate lookup (cross-org) → bcrypt verify → active check → 100/min sliding-window rate limit → BackgroundTask audit log. The matched key's `org_id` lands on `request.state.org_id` for downstream use. `verify_admin_token` for the key-management endpoints. |
 | `main.py` `get_org_id(request)` | Resolves the request's tenant: `X-Org-ID` header → `ORG_ID` env → seed default UUID. Wired as `_OrgDep` on every internal endpoint that touches a tenant-scoped table. |
@@ -139,7 +139,7 @@ All four primary routes (`/`, `/brain`, `/brain/api`, `/brain/sources`) render t
 | `/brain` | Knowledge-base dashboard. 5-card metric row (workflows, sources, last updated, last synced, **needs review**). Conflicts banner + section with severity-coded cards (two-column diff, Accept/Dismiss/Snooze). Workflow grid/list with search, source filter, sort, view toggle. Each workflow card has a kebab menu (Copy JSON, Mark as reviewed, Archive). Onboarding banner appears at top while `localStorage.flowithm_onboarding_step !== 'complete'` — auto-completes the moment any workflow exists in the list. |
 | `/brain/[id]` | Workflow detail. Two-panel render. Header has Edit name / Re-extract / Mark as reviewed / Archive. **Staleness banner** above the panels when `needs_review` is true. |
 | `/brain/api` | Agent API tab. Keys management (table + two-click revoke + new-key modal showing plaintext once with copy button). 30-day usage stats (cards + 14-day local-time SVG bar chart). Three integration snippets (TS / Python / Claude tool use) with the `needs_review` escalation pattern in each. Live `/skills/match` playground via server-side playground key with syntax-highlighted JSON response. |
-| `/brain/sources` | Connected-sources dashboard. Last-run banner with new-chunks / skipped / conflicts / staleness counts and inline-expandable error logs. Per-source cards (type icon, name, active/paused toggle, last_synced, two-click Remove). + Connect source modal with per-type fields (Slack / Notion / **Gmail** / **Intercom** / GitHub). |
+| `/brain/sources` | Connected-sources dashboard. Last-run banner with new-chunks / skipped / conflicts / staleness counts and inline-expandable error logs. Per-source cards (type icon, name, active/paused toggle, last_synced, **Test connection** button + "Last verified" status, two-click Remove). + Connect source modal with per-type fields (Slack / Notion / **Gmail** / **Intercom** / GitHub); the modal runs a connection check before saving — Save is gated on a passing test. |
 | `/workflow/[id]` | Slack-bot deeplink target. Read-only two-panel render with Copy JSON. |
 | `/login` | Email/password sign-in via Supabase Auth. Redirects to `/brain` on success. Already-authenticated users auto-redirect to `/brain`. |
 | `/signup` | Account creation. Collects company name, email, password, optional display name. Two-step: client-side `signUp()` → server-side org creation + user-link via `POST /api/auth/signup`. Redirects to `/brain` on success. |
@@ -166,7 +166,7 @@ which resolves the org from the Supabase Auth session → `users` table).
 - `/api/admin/keys/[id]` — DELETE → FastAPI `/api/v1/keys/{id}`
 - `/api/admin/usage` — Supabase aggregations for the dashboard
 - `/api/admin/playground` — GET → FastAPI `/api/v1/skills/match` (with `FLOWITHM_PLAYGROUND_KEY`); the playground key carries its own org_id
-- `/api/admin/sources` + `[id]` — CRUD proxies for `/sources`
+- `/api/admin/sources` + `[id]` — CRUD proxies for `/sources`; `[id]/validate` + `/validate` proxy the connection-check endpoints
 - `/api/admin/ingest` — GET status + POST trigger
 - `/api/admin/workflows/generate` — POST → FastAPI `/workflows/generate` (used by onboarding step 3)
 
@@ -192,7 +192,7 @@ Postgres on Supabase, with `vector` (pgvector) and `pg_trgm` extensions.
 | `api_keys` | Public agent API auth. `key_hash` (bcrypt), `key_prefix` (indexed for candidate lookup), `request_count`, `last_used_at`, `is_active`. `org_id` resolved at auth time and propagated to every downstream query. |
 | `api_requests` | Per-call audit log written from BackgroundTasks. Includes endpoint, query, matched_skill_id, response_time_ms. |
 | `executions` | Agent feedback loop — `outcome ∈ {completed, escalated, exception_triggered}` + optional `exception_note` (triggers a drift check via Claude judgement). `org_id`. |
-| `connected_sources` | Per-tenant ingest source configs. `source_type` + jsonb `config` (AES-256-GCM encrypted at rest via `brain/crypto.py`; decrypted on read by the scheduler; redacted in API responses). `org_id`. |
+| `connected_sources` | Per-tenant ingest source configs. `source_type` + jsonb `config` (AES-256-GCM encrypted at rest via `brain/crypto.py`; decrypted on read by the scheduler; redacted in API responses). `last_validated_at` + `last_validation_status` (`valid`/`invalid`) + `last_validation_error` cache the last connection check. `org_id`. |
 | `ingest_runs` | One row per scheduled or manual run. `new_chunks`, `skipped_chunks`, `new_conflicts`, `stale_flagged`, `stale_cleared`, `errors` jsonb array. `org_id`. |
 | `ingest_lock` | Singleton row-mutex. `try_acquire_ingest_lock(holder)` / `release_ingest_lock()`. 15-min stale-lock timeout for self-healing. **Global** — not per-org. |
 

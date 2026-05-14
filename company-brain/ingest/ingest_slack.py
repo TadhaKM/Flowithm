@@ -61,6 +61,33 @@ class SlackIngestor(BaseIngestor):
         self.channel_ids = channel_ids or []
         self.since = since
 
+    def validate_connection(self) -> dict[str, Any]:
+        """One cheap auth.test call to confirm the bot token is live.
+        Returns {"valid": bool, "error": str | None}."""
+        if not self.token:
+            return {"valid": False, "error": "No bot token provided."}
+        try:
+            from slack_sdk.web import WebClient
+            from slack_sdk.errors import SlackApiError
+        except ImportError:
+            return {"valid": False, "error": "slack_sdk is not installed on the server."}
+        try:
+            resp = WebClient(token=self.token, timeout=10).auth_test()
+            if resp.get("ok"):
+                return {"valid": True, "error": None}
+            return {"valid": False, "error": f"Slack rejected the token: {resp.get('error', 'unknown')}"}
+        except SlackApiError as exc:
+            code = exc.response.get("error", "unknown") if exc.response else "unknown"
+            friendly = {
+                "invalid_auth": "Invalid bot token.",
+                "token_revoked": "This bot token has been revoked.",
+                "token_expired": "This bot token has expired.",
+                "account_inactive": "The Slack workspace or bot account is inactive.",
+            }.get(code, f"Slack auth failed: {code}")
+            return {"valid": False, "error": friendly}
+        except Exception as exc:
+            return {"valid": False, "error": f"Could not reach Slack: {exc}"}
+
     def build_chunks(self, messages: list[dict] | None) -> list[Chunk]:
         # Live mode: token + channel_ids set, messages was passed as None
         # by the scheduler. Fetch first, then chunk.
