@@ -207,7 +207,20 @@ def list_keys(
 ) -> list[dict[str, Any]]:
     org = request.headers.get("x-org-id") or None
     rows = list_api_keys(org_id=org)
-    return rows[:limit]
+    # list_api_keys returns the DB column `key_prefix`; ApiKeySummary expects
+    # `prefix`. Map explicitly so response validation doesn't 500.
+    return [
+        {
+            "id": str(r.get("id") or ""),
+            "name": r.get("name") or "",
+            "prefix": r.get("key_prefix") or "",
+            "created_at": r.get("created_at"),
+            "last_used_at": r.get("last_used_at"),
+            "request_count": r.get("request_count") or 0,
+            "is_active": bool(r.get("is_active", True)),
+        }
+        for r in rows[:limit]
+    ]
 
 
 @agent_app.delete(
