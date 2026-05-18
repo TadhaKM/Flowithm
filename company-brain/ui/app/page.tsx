@@ -84,7 +84,8 @@ export default function Home() {
     setChipLoading(chip.slug);
     setError(null);
     try {
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/demo/${chip.slug}`);
+      // Same-origin proxy — avoids CORS + a wrong/missing NEXT_PUBLIC_API_URL.
+      const res = await fetch(`/api/demo/${encodeURIComponent(chip.slug)}`);
       if (!res.ok)
         throw new Error(`Demo not found: ${chip.slug} (HTTP ${res.status})`);
       const text = await res.text();
