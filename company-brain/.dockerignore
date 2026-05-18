@@ -24,8 +24,9 @@ pytest.ini
 # Frontend — built and deployed to Vercel separately.
 ui
 
-# CLI / one-shot demo material — not needed at runtime.
-demo-data
+# graphify-out is CLI scratch output, never read at runtime.
+# demo-data is intentionally NOT excluded: GET /demo/{slug} reads from it
+# at runtime to feed the home page's "Try a demo" chips.
 graphify-out
 
 # Source control + editors
