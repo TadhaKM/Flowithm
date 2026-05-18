@@ -56,7 +56,7 @@ from brain.store import (
     clear_workflows,
     count_chunks,
     create_organisation,
-    deactivate_connected_source,
+    delete_connected_source,
     find_similar_workflow,
     get_connected_source,
     get_latest_ingest_run,
@@ -772,11 +772,13 @@ def sources_update(
 
 @app.delete("/sources/{source_id}")
 def sources_delete(source_id: str, org_id: str = _OrgDep, _admin=_AdminDep) -> dict:
-    """Soft-delete (is_active=false). Stops the scheduler picking it up."""
-    ok = deactivate_connected_source(source_id, org_id=org_id)
+    """Hard-delete the source row. The Pause toggle on the dashboard uses
+    PATCH {is_active: false} for soft-delete; this endpoint is the
+    permanent Remove path — the source disappears from the list."""
+    ok = delete_connected_source(source_id, org_id=org_id)
     if not ok:
         raise HTTPException(404, f"source not found: {source_id}")
-    return {"status": "ok", "deactivated": source_id}
+    return {"status": "ok", "deleted": source_id}
 
 
 # IMPORTANT: declare /sources/validate BEFORE /sources/{source_id}/validate —

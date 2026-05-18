@@ -607,6 +607,20 @@ def deactivate_connected_source(source_id: str, org_id: str | None = None) -> bo
     return bool(result.data)
 
 
+def delete_connected_source(source_id: str, org_id: str | None = None) -> bool:
+    """Hard-delete the row. No other table references connected_sources.id
+    (see schema.sql), so deletion is safe — there's nothing to cascade."""
+    client = get_client()
+    result = (
+        client.table("connected_sources")
+        .delete()
+        .eq("id", source_id)
+        .eq("org_id", org_id or _default_org_id())
+        .execute()
+    )
+    return bool(result.data)
+
+
 def update_source_last_synced(source_id: str, when_iso: str, org_id: str | None = None) -> None:
     client = get_client()
     q = client.table("connected_sources").update({"last_synced_at": when_iso}).eq("id", source_id)

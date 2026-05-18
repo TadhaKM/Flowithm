@@ -347,7 +347,9 @@ def test_sources_delete_happy_path(client, mock_supabase):
     }]
     res = client.delete("/sources/src1")
     assert res.status_code == 200
-    assert res.json()["deactivated"] == "src1"
+    # DELETE /sources/{id} now hard-deletes (PATCH {is_active:false} covers
+    # the soft-delete / Pause path).
+    assert res.json()["deleted"] == "src1"
 
 
 def test_sources_delete_not_found(client, mock_supabase):
