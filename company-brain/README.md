@@ -81,6 +81,112 @@ The API will be available at http://localhost:8000.
 
 Open the UI, ask a question, and the backend will retrieve relevant chunks from the vector store and answer with Claude.
 
+## Agent API
+
+Mount point: `/api/v1`. Auth: every call needs `Authorization: Bearer <fb_live_...>` — mint a key from the **Agent API** tab of the dashboard. A live OpenAPI spec is at `/api/v1/openapi.json`; Swagger UI is at `/api/v1/docs`.
+
+Two endpoints make up the core agent surface:
+
+| Endpoint | When to call it |
+|---|---|
+| `GET /api/v1/skills/match` | *"What is our process for X?"* — returns the workflow the agent should follow. |
+| `POST /api/v1/skills/check` | *"Is this action allowed by our process?"* — returns whether the agent can proceed and what approvals are needed if not. |
+
+Together: `match` tells the agent how to act correctly, `check` is a guardrail that stops it from acting incorrectly.
+
+### `GET /api/v1/skills/match` — find the workflow
+
+Semantic search over your skills. Top-10 raw candidates are re-ranked by a recency-weighted score (`similarity * 0.7 + recency * 0.3`) so a slightly less similar but more recently confirmed workflow beats a very similar but stale one.
+
+```bash
+curl "https://flowithm.io/api/v1/skills/match?q=customer+wants+a+refund+after+45+days" \
+  -H "Authorization: Bearer fb_live_..."
+```
+
+```json
+{
+  "matched": true,
+  "confidence": "high",
+  "similarity_score": 0.83,
+  "recency_score": 1.0,
+  "combined_score": 0.881,
+  "query": "customer wants a refund after 45 days",
+  "skill": {
+    "id": "...",
+    "process": "Customer refund handling",
+    "steps": [ /* ... */ ],
+    "decision_rules": [ /* ... */ ],
+    "approvals": [ /* ... */ ],
+    "exceptions": [ /* ... */ ]
+  },
+  "last_confirmed_at": "2026-04-20T12:00:00+00:00",
+  "days_since_confirmed": 25,
+  "source_freshness": "fresh",
+  "freshness_warning": null
+}
+```
+
+Confidence tiers are computed from raw `similarity_score`: `high` (≥0.75), `medium` (0.40-0.75). Below 0.40 the endpoint returns `404 SKILL_NOT_FOUND` with up to 3 closest suggestions. If `source_freshness` is `stale`, surface `freshness_warning` to the operator — it's a verbatim escalation instruction written for humans.
+
+### `POST /api/v1/skills/check` — guardrail before acting
+
+Call this **before** any potentially destructive action. The endpoint finds the most relevant skill and asks Claude whether the proposed action follows the documented `decision_rules` / `approvals` / `exceptions`.
+
+```bash
+curl -X POST "https://flowithm.io/api/v1/skills/check" \
+  -H "Authorization: Bearer fb_live_..." \
+  -H "Content-Type: application/json" \
+  -d '{
+    "proposed_action": "Approve and process a $2400 refund immediately without escalation",
+    "context": "Customer on Enterprise plan, claims product was defective, purchase was 8 weeks ago"
+  }'
+```
+
+```json
+{
+  "allowed": false,
+  "reason": "Refunds over $500 require CS lead approval before processing.",
+  "required_approvals": [
+    "CS lead via Slack DM with reason and Stripe charge ID"
+  ],
+  "violations": [],
+  "suggested_action": "Route to CS lead for approval before processing the refund.",
+  "matched_skill": { "id": "...", "process": "Customer refund handling" },
+  "confidence": "high"
+}
+```
+
+The endpoint **fails closed**: if no skill matches above the confidence floor, or Claude is unavailable, you get `allowed: false` with `confidence: "low"` and an escalation suggestion. An agent that surfaces `result["reason"]` and `result["suggested_action"]` verbatim never needs to know whether the guardrail blocked it because of a real policy or because the policy wasn't on file — the answer to both is *escalate*.
+
+The Python pattern:
+
+```python
+import requests, os
+
+response = requests.post(
+    f"{os.environ['FLOWITHM_API_URL']}/api/v1/skills/check",
+    json={
+        "proposed_action": "approve $2400 refund",
+        "context": "Enterprise customer, defective product",
+    },
+    headers={"Authorization": f"Bearer {os.environ['FLOWITHM_API_KEY']}"},
+)
+result = response.json()
+
+if not result["allowed"]:
+    escalate_to_human(result["suggested_action"], result["reason"])
+else:
+    proceed_with_action()
+```
+
+A runnable end-to-end demo using both endpoints with a real Claude agent lives at `demo/agent_demo.py`:
+
+```bash
+python demo/agent_demo.py
+```
+
+It walks through three customer refund scenarios (Claude calling `/skills/match` as a tool) and a fourth scenario showing the pre-action `/skills/check` guardrail.
+
 ## Connecting Gmail
 
 Gmail is the highest-value source for capturing real process decisions —

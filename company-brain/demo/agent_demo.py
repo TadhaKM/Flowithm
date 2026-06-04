@@ -1,10 +1,12 @@
 """FlowBrain agent demo — proves a real Claude agent follows company-specific
-workflows instead of guessing.
+workflows AND can be guarded against acting outside them.
 
-Simulates a customer-support agent at Loopline (demo company) handling three
-realistic refund scenarios. For each one, Claude calls FlowBrain's
-GET /api/v1/skills/match to retrieve the exact workflow before responding —
-including the edge cases generic AI would get wrong.
+Simulates a customer-support agent at Loopline (demo company) handling four
+scenarios:
+  1-3) Refund handling via /skills/match — Claude calls FlowBrain as a tool
+       to retrieve the workflow before responding.
+  4)   Pre-action guardrail via /skills/check — direct API demo showing how
+       a harness gates a destructive action before it happens.
 
 Run from the company-brain directory:
     python demo/agent_demo.py
@@ -14,6 +16,21 @@ Reads from .env:
     FLOWBRAIN_API_URL   — base URL of the deployed FlowBrain API (Railway)
     FLOWBRAIN_API_KEY   — a minted FlowBrain API key (fb_live_...)
 """
+
+# Flowithm has two core capabilities:
+#
+# 1. GET /api/v1/skills/match
+#    "What is our process for X?"
+#    Returns the workflow your agent should follow.
+#
+# 2. POST /api/v1/skills/check
+#    "Is this action allowed by our process?"
+#    Returns whether the agent can proceed and what approvals are needed
+#    if not.
+#
+# Together these give agents both the knowledge to act correctly and a
+# guardrail to prevent acting incorrectly.
+
 import json
 import os
 import sys
@@ -113,6 +130,34 @@ def call_flowbrain(situation: str) -> dict:
     return {"error": f"No workflow found (HTTP {response.status_code})", "detail": body}
 
 
+def call_flowbrain_check(proposed_action: str, context: str | None = None) -> dict:
+    """Call FlowBrain's POST /skills/check guardrail endpoint.
+
+    Returns the verdict body on success; on failure returns an {"error": ...}
+    dict so the caller can render the failure without a try/except."""
+    payload: dict = {"proposed_action": proposed_action}
+    if context:
+        payload["context"] = context
+    try:
+        response = requests.post(
+            f"{os.environ['FLOWBRAIN_API_URL'].rstrip('/')}/api/v1/skills/check",
+            json=payload,
+            headers={"Authorization": f"Bearer {os.environ['FLOWBRAIN_API_KEY']}"},
+            # /check runs a Claude call server-side — give it room.
+            timeout=45,
+        )
+    except requests.RequestException as exc:
+        return {"error": f"FlowBrain request failed: {exc}"}
+
+    if response.status_code == 200:
+        return response.json()
+    try:
+        body = response.json()
+    except ValueError:
+        body = response.text
+    return {"error": f"Guardrail check failed (HTTP {response.status_code})", "detail": body}
+
+
 def run_support_agent(customer_message: str, scenario_name: str) -> None:
     """Run the support agent for one customer message, printing the trace."""
     print(f"\n{'=' * 60}")
@@ -187,6 +232,78 @@ def run_support_agent(customer_message: str, scenario_name: str) -> None:
     print("\n[Agent stopped: hit the max turn limit without finishing]")
 
 
+def run_guardrail_check_demo(
+    proposed_action: str, context: str, scenario_name: str
+) -> None:
+    """Direct call to POST /skills/check — the pre-action guardrail pattern.
+
+    Unlike scenarios 1-3 (where Claude decides when to call FlowBrain via
+    tool use), this scenario calls the endpoint directly so you can see
+    the response shape. In a real agent harness this is the pattern you'd
+    wrap around any potentially-destructive action: ask first, act second."""
+    print(f"\n{'=' * 60}")
+    print(f"SCENARIO: {scenario_name}")
+    print(f"{'=' * 60}")
+    print(f"Proposed action: {proposed_action}")
+    print(f"Context: {context}")
+    print(f"{'-' * 60}")
+
+    print("\n[Calling POST /api/v1/skills/check]")
+    verdict = call_flowbrain_check(proposed_action, context)
+
+    # Network / HTTP-level failure (no verdict body)
+    if "allowed" not in verdict:
+        print(f"\n[Guardrail call failed: {verdict.get('error')}]")
+        if "detail" in verdict:
+            print(f"Detail: {verdict['detail']}")
+        return
+
+    allowed = verdict.get("allowed")
+    confidence = verdict.get("confidence", "unknown")
+
+    print("\n[Guardrail verdict]")
+    print(f"  allowed:    {allowed}")
+    print(f"  confidence: {confidence}")
+    print(f"  reason:     {verdict.get('reason') or '(none)'}")
+
+    approvals = verdict.get("required_approvals") or []
+    if approvals:
+        print("  required_approvals:")
+        for a in approvals:
+            print(f"    - {a}")
+    else:
+        print("  required_approvals: (none)")
+
+    violations = verdict.get("violations") or []
+    if violations:
+        print("  violations:")
+        for v in violations:
+            print(f"    - {v}")
+    else:
+        print("  violations: (none)")
+
+    suggested = verdict.get("suggested_action") or ""
+    if suggested:
+        print(f"  suggested_action: {suggested}")
+
+    matched = verdict.get("matched_skill")
+    if matched:
+        print(f"\n[Matched skill: '{matched.get('process')}']")
+    else:
+        print("\n[No skill matched — guardrail failed closed]")
+
+    # How a real harness would react
+    print("\n[Agent decision]")
+    if allowed is False:
+        print("  BLOCKED. The harness would now:")
+        target = approvals[0] if approvals else "a human reviewer"
+        print(f"    - Route the action to: {target}")
+        if suggested:
+            print(f"    - Surface to operator: {suggested}")
+    elif allowed is True:
+        print("  APPROVED. The harness would proceed with the action.")
+
+
 if __name__ == "__main__":
     print("FlowBrain Agent Demo")
     print("Proving AI agents follow company-specific rules")
@@ -214,9 +331,24 @@ if __name__ == "__main__":
     for message, name in scenarios:
         run_support_agent(message, name)
 
+    # Scenario 4 — guardrail demo. Shows the POST /skills/check endpoint
+    # directly, the pattern an agent harness uses to gate destructive
+    # actions before they happen.
+    run_guardrail_check_demo(
+        proposed_action=(
+            "Approve and process a $2400 refund immediately without escalation"
+        ),
+        context=(
+            "Customer on Enterprise plan, claims product was defective, "
+            "purchase was 8 weeks ago"
+        ),
+        scenario_name="Guardrail check - $2400 refund without escalation",
+    )
+
     print(f"\n{'=' * 60}")
     print("Demo complete.")
     print("FlowBrain gave the agent company-specific rules for every")
-    print("scenario - including edge cases that generic AI would have")
-    print("gotten wrong.")
+    print("scenario (including edge cases generic AI would have gotten")
+    print("wrong) AND blocked the destructive action the agent should not")
+    print("have taken on its own.")
     print("=" * 60)
