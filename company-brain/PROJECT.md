@@ -131,7 +131,7 @@ same thread when conflicts are found. Uses `FLOWITHM_URL` /
 The dashboard is a Next.js 16 App Router project with Tailwind v3.
 Brand colour `#1D9E75` (teal); dark theme using zinc neutrals.
 
-All four primary routes (`/`, `/brain`, `/brain/api`, `/brain/sources`) render the shared `components/TopNav` so users can hop between them from any page. The current route renders as a non-clickable highlighted span; the rest are Links. `usePathname()` decides which is active.
+All four primary routes (`/`, `/brain`, `/brain/api`, `/brain/sources`) render the shared `components/TopNav` so users can hop between them from any page. The current route renders as a non-clickable highlighted span; the rest are Links. `usePathname()` decides which is active. `components/Footer` is mounted once in `app/layout.tsx` and links to `/privacy` (the public Privacy & security page) on every route.
 
 | Route | Purpose |
 |---|---|
@@ -141,6 +141,7 @@ All four primary routes (`/`, `/brain`, `/brain/api`, `/brain/sources`) render t
 | `/brain/api` | Agent API tab. Keys management (table + two-click revoke + new-key modal showing plaintext once with copy button). 30-day usage stats (cards + 14-day local-time SVG bar chart). Four integration snippets (TS / Python / Claude tool use / **Guardrail check**) with the `needs_review` escalation pattern in the first three; the Guardrail tab shows the pre-action `/skills/check` call pattern. Live `/skills/match` playground via server-side playground key with syntax-highlighted JSON response. |
 | `/brain/sources` | Connected-sources dashboard. Last-run banner with new-chunks / skipped / conflicts / staleness counts and inline-expandable error logs. Per-source cards (type icon, name, active/paused toggle, last_synced, **Test connection** button + "Last verified" status, two-click Remove). + Connect source modal with per-type fields (Slack / Notion / **Gmail** / **Intercom** / GitHub); the modal runs a connection check before saving — Save is gated on a passing test. |
 | `/workflow/[id]` | Slack-bot deeplink target. Read-only two-panel render with Copy JSON. |
+| `/privacy` | Public Privacy & security page. Seven plain-prose sections (data isolation, no training, encryption, access controls, source permissions, deletion, contact). Linked from the site-wide footer. |
 | `/login` | Email/password sign-in via Supabase Auth. Redirects to `/brain` on success. Already-authenticated users auto-redirect to `/brain`. |
 | `/signup` | Account creation. Collects company name, email, password, optional display name. Two-step: client-side `signUp()` → server-side org creation + user-link via `POST /api/auth/signup`. Redirects to `/brain` on success. |
 | `/setup` | Legacy first-run organisation bootstrap (step 1 of 3). Still functional for self-hosted single-tenant deploys with `FLOWITHM_DEFAULT_ORG_ID`. Multi-tenant deploys use `/signup` instead. |
