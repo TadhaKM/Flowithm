@@ -77,10 +77,10 @@ const SECTIONS: { heading: string; body: React.ReactNode }[] = [
       <>
         For security questions or concerns, email{" "}
         <a
-          href="mailto:marepalt@tcd.ie"
+          href="mailto:jpau7400@gmail.com"
           className="text-[#1D9E75] hover:text-[#34b88a] transition-colors"
         >
-          marepalt@tcd.ie
+          jpau7400@gmail.com
         </a>
         .
       </>
