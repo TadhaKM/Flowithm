@@ -280,8 +280,8 @@ Mounted at `/api/v1`. Bearer-token auth on every endpoint. Standard
 | GET | `/api/v1/keys` | List keys (admin-only). Plaintext never serialised. |
 | DELETE | `/api/v1/keys/{id}` | Revoke (admin-only). Soft-delete. |
 | GET | `/api/v1/skills` | Paginated index. Filters: `?source`, `?updated_after`, `?needs_review`, `?limit`, `?offset`. |
-| GET | `/api/v1/skills/match?q=...` | Semantic match via voyage-3 + match_skills RPC. Confidence tiers: high (≥0.75), medium (0.40-0.75). 404 with closest-3 below 0.40. |
-| GET | `/api/v1/skills/{name}` | Exact-match (case-insensitive) → pg_trgm fuzzy fallback at 0.4. 404 with `closest_match` above 0.2. |
+| GET | `/api/v1/skills/match?q=...` | Semantic match via voyage-3 + match_skills RPC. Confidence tiers: high (≥0.75), medium (0.40-0.75). 404 with closest-3 below 0.40. Response includes freshness envelope: `last_confirmed_at`, `days_since_confirmed`, `source_freshness` (fresh / aging / stale), `freshness_warning`. Stale matches auto-flag `needs_review=true` server-side via BackgroundTask. |
+| GET | `/api/v1/skills/{name}` | Exact-match (case-insensitive) → pg_trgm fuzzy fallback at 0.4. 404 with `closest_match` above 0.2. Same freshness envelope as `/skills/match`. |
 | POST | `/api/v1/skills/execute` | Agent feedback. `{skill_id, step_number, outcome, exception_note?, duration_seconds?}`. If `exception_note` is supplied, Claude haiku judges whether it's already covered → if NO, fires a drift check. |
 
 Rate limit: 100 req/min per key, sliding window, in-memory.

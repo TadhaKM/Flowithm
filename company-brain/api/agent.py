@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import secrets
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 import anthropic
@@ -27,10 +28,12 @@ from brain.store import (
     deactivate_api_key,
     find_similar_workflow,
     get_skill_by_name_fuzzy,
+    get_skill_reviewed_at,
     insert_api_key,
     insert_execution,
     list_api_keys,
     list_skills_index,
+    mark_needs_review,
     match_skills_by_embedding,
 )
 
@@ -38,6 +41,94 @@ KEY_PLAINTEXT_PREFIX = "fb_live_"
 KEY_TOKEN_BYTES = 32
 HIGH_CONF = 0.75
 LOW_CONF = 0.40
+
+# Source freshness thresholds. <30d fresh, 30-90d aging, >90d stale.
+# Used by the freshness envelope on /skills/match and /skills/{name}.
+FRESH_DAYS = 30
+AGING_DAYS = 90
+
+
+def _freshness_envelope(
+    skill_id: str,
+    generated_at: str | None,
+    reviewed_at: str | None,
+    needs_review_already: bool,
+    background: BackgroundTasks,
+    org_id: str | None,
+) -> dict[str, Any]:
+    """Compute the freshness fields for an agent-API skill response:
+    last_confirmed_at, days_since_confirmed, source_freshness, freshness_warning.
+
+    Per spec:
+      last_confirmed_at  = reviewed_at if set, else generated_at
+      days_since_confirmed = days between that timestamp and now (UTC)
+      source_freshness   = fresh (<30d) | aging (30-90d) | stale (>=90d)
+      freshness_warning  = null (fresh) | advisory text (aging) | escalation
+                           instruction (stale)
+
+    Side effect: if stale and needs_review isn't already set, schedules a
+    background task to flip needs_review=true so the dashboard's review
+    queue picks it up. Background tasks run after the response is sent,
+    so this doesn't add latency."""
+    last_confirmed = reviewed_at or generated_at
+    if not last_confirmed:
+        return {
+            "last_confirmed_at": None,
+            "days_since_confirmed": None,
+            "source_freshness": None,
+            "freshness_warning": None,
+        }
+    try:
+        confirmed_dt = datetime.fromisoformat(str(last_confirmed).replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return {
+            "last_confirmed_at": last_confirmed,
+            "days_since_confirmed": None,
+            "source_freshness": None,
+            "freshness_warning": None,
+        }
+    # Supabase timestamptz round-trips with a tz, but test fixtures sometimes
+    # hand back naive strings — assume UTC so the subtraction can't blow up.
+    if confirmed_dt.tzinfo is None:
+        confirmed_dt = confirmed_dt.replace(tzinfo=timezone.utc)
+
+    days = max(0, (datetime.now(timezone.utc) - confirmed_dt).days)
+
+    if days < FRESH_DAYS:
+        return {
+            "last_confirmed_at": last_confirmed,
+            "days_since_confirmed": days,
+            "source_freshness": "fresh",
+            "freshness_warning": None,
+        }
+    if days < AGING_DAYS:
+        return {
+            "last_confirmed_at": last_confirmed,
+            "days_since_confirmed": days,
+            "source_freshness": "aging",
+            "freshness_warning": (
+                f"This workflow was last reviewed {days} days ago. "
+                "Consider verifying before acting on it."
+            ),
+        }
+
+    # Stale — auto-flag for review (idempotent; mark_needs_review swallows errors).
+    if not needs_review_already and skill_id:
+        background.add_task(
+            mark_needs_review,
+            skill_id,
+            f"Auto-flagged: {days} days since last confirmation.",
+            org_id,
+        )
+    return {
+        "last_confirmed_at": last_confirmed,
+        "days_since_confirmed": days,
+        "source_freshness": "stale",
+        "freshness_warning": (
+            f"This workflow has not been reviewed in {days} days and may be "
+            "outdated. Escalate to a human rather than acting automatically."
+        ),
+    }
 
 agent_app = FastAPI(
     title="Flowithm Agent API",
@@ -317,8 +408,19 @@ def list_skills_endpoint(
     description=(
         "Embeds the query (voyage-3) and runs cosine similarity over "
         "skills.summary_embedding. Returns the top hit with a confidence "
-        "tier ('high' >= 0.75, 'medium' 0.40–0.75). Below 0.40, returns "
-        "404 SKILL_NOT_FOUND with up to 3 closest suggestions."
+        "tier ('high' >= 0.75, 'medium' 0.40-0.75). Below 0.40, returns "
+        "404 SKILL_NOT_FOUND with up to 3 closest suggestions.\n\n"
+        "**Freshness envelope** (top-level fields):\n"
+        "- `last_confirmed_at` — ISO8601 of `reviewed_at` if set, else `generated_at`. "
+        "When a workflow was last vouched for as accurate.\n"
+        "- `days_since_confirmed` — integer days between `last_confirmed_at` and now (UTC).\n"
+        "- `source_freshness` — `fresh` (<30d) | `aging` (30-90d) | `stale` (>=90d). "
+        "Agents should treat `stale` workflows as advisory and escalate.\n"
+        "- `freshness_warning` — null when fresh; a human-readable advisory when aging; "
+        "an escalation instruction when stale. **Surface this verbatim to end users / "
+        "operators when present.**\n\n"
+        "Side effect: a stale match auto-flags the underlying skill for review "
+        "(needs_review=true) so it appears in the dashboard's review queue."
     ),
     responses={
         200: {
@@ -330,6 +432,13 @@ def list_skills_endpoint(
                         "similarity_score": 0.83,
                         "query": "customer wants a refund after 45 days",
                         "skill": {"id": "...", "process": "Customer refund handling", "...": "..."},
+                        "last_confirmed_at": "2026-02-01T12:00:00+00:00",
+                        "days_since_confirmed": 103,
+                        "source_freshness": "stale",
+                        "freshness_warning": (
+                            "This workflow has not been reviewed in 103 days and may be "
+                            "outdated. Escalate to a human rather than acting automatically."
+                        ),
                     }
                 }
             }
@@ -395,6 +504,19 @@ def match_skill_endpoint(
     skill = _row_to_agent_skill(top)
     log_match_request(background, request, q, skill["id"])
 
+    # The match_skills RPC doesn't return reviewed_at; fetch it for the top
+    # hit so the freshness envelope can use "reviewed_at if set, else
+    # generated_at" per the spec.
+    reviewed_at = get_skill_reviewed_at(skill["id"], org_id=org_id)
+    freshness = _freshness_envelope(
+        skill_id=skill["id"],
+        generated_at=top.get("generated_at"),
+        reviewed_at=reviewed_at,
+        needs_review_already=bool(top.get("needs_review")),
+        background=background,
+        org_id=org_id,
+    )
+
     elapsed_ms = int((time.perf_counter() - started) * 1000)
     if elapsed_ms > 1000:
         print(f"[agent-api] /skills/match slow: {elapsed_ms}ms (q={q!r})", flush=True)
@@ -405,6 +527,7 @@ def match_skill_endpoint(
         "similarity_score": round(score, 4),
         "query": q,
         "skill": skill,
+        **freshness,
     }
 
 
@@ -414,18 +537,35 @@ def match_skill_endpoint(
     description=(
         "Tries an exact (case-insensitive) match first. If none, falls back "
         "to pg_trgm fuzzy match at threshold 0.4. On miss, returns 404 with "
-        "the closest match name (above 0.2) for the agent to retry with."
+        "the closest match name (above 0.2) for the agent to retry with.\n\n"
+        "Response includes the same freshness fields as `/skills/match`:\n"
+        "- `last_confirmed_at` — `reviewed_at` if set, else `generated_at`.\n"
+        "- `days_since_confirmed` — integer days vs. now (UTC).\n"
+        "- `source_freshness` — `fresh` | `aging` | `stale`.\n"
+        "- `freshness_warning` — null when fresh; a verbatim advisory for aging "
+        "or escalation for stale.\n\n"
+        "Stale skills auto-flag `needs_review=true` server-side."
     ),
 )
 def get_skill_endpoint(
     process_name: str,
     request: Request,
+    background: BackgroundTasks,
     api_key=ApiKeyDep,
 ) -> dict[str, Any]:
     org_id = getattr(request.state, "org_id", None) or None
     skill, closest = get_skill_by_name_fuzzy(process_name, org_id=org_id)
     if skill:
-        return _workflow_to_agent_skill(skill)
+        agent_skill = _workflow_to_agent_skill(skill)
+        freshness = _freshness_envelope(
+            skill_id=str(agent_skill.get("id") or ""),
+            generated_at=skill.get("generated_at"),
+            reviewed_at=skill.get("reviewed_at"),
+            needs_review_already=bool(skill.get("needs_review")),
+            background=background,
+            org_id=org_id,
+        )
+        return {**agent_skill, **freshness}
     raise _err(
         404, "SKILL_NOT_FOUND",
         f"No workflow found for {process_name!r}",

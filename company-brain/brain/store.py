@@ -388,6 +388,55 @@ def match_skills_by_embedding(
     return result.data or []
 
 
+def get_skill_reviewed_at(skill_id: str, org_id: str | None = None) -> str | None:
+    """Single-column read — the match_skills RPC returns generated_at but not
+    reviewed_at, and the /skills/match freshness envelope needs both. Cheap
+    indexed lookup by primary key."""
+    if not skill_id:
+        return None
+    client = get_client()
+    result = (
+        client.table(SKILLS_TABLE)
+        .select("reviewed_at")
+        .eq("id", skill_id)
+        .eq("org_id", org_id or _default_org_id())
+        .limit(1)
+        .execute()
+    )
+    rows = result.data or []
+    if not rows:
+        return None
+    return rows[0].get("reviewed_at")
+
+
+def mark_needs_review(skill_id: str, reason: str, org_id: str | None = None) -> None:
+    """Idempotently flag a skill for human review. Sets needs_review=true,
+    needs_review_reason, and stale_flagged_at. Safe to call on an already-
+    flagged row (overwrites reason + timestamp). Background-task friendly:
+    swallows exceptions so a logging side-effect never crashes a response."""
+    if not skill_id:
+        return
+    try:
+        from datetime import datetime as _dt
+        from datetime import timezone as _tz
+
+        client = get_client()
+        (
+            client.table(SKILLS_TABLE)
+            .update({
+                "needs_review": True,
+                "needs_review_reason": reason,
+                "stale_flagged_at": _dt.now(_tz.utc).isoformat(),
+            })
+            .eq("id", skill_id)
+            .eq("org_id", org_id or _default_org_id())
+            .execute()
+        )
+    except Exception:
+        # Logged separately if needed; never escalate from a background task.
+        pass
+
+
 # ---------------------------------------------------------------------------
 # api_keys, api_requests, executions
 # ---------------------------------------------------------------------------
