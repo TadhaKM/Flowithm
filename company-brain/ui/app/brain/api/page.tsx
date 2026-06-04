@@ -571,6 +571,26 @@ if workflow.get("needs_review"):
 for step in workflow["steps"]:
     execute_step(step)`,
 
+  guardrail: `import requests
+
+# Before taking any action, check if it's allowed.
+response = requests.post(
+    "https://flowithm.io/api/v1/skills/check",
+    json={
+        "proposed_action": "approve $2400 refund",
+        "context": "Enterprise customer, defective product",
+    },
+    headers={"Authorization": f"Bearer {FLOWITHM_API_KEY}"},
+)
+result = response.json()
+
+if not result["allowed"]:
+    # Surface result["reason"] and result["suggested_action"] verbatim —
+    # the model wrote them so they're safe to read to a human reviewer.
+    escalate_to_human(result["suggested_action"], result["reason"])
+else:
+    proceed_with_action()`,
+
   claude: `# Define Flowithm as a tool for your Claude agent.
 # Once Claude calls it, inspect the response — if needs_review is true,
 # stop and escalate rather than acting on the workflow.
@@ -599,7 +619,7 @@ tools = [{
 };
 
 function SnippetsSection() {
-  const [tab, setTab] = useState<"ts" | "py" | "claude">("ts");
+  const [tab, setTab] = useState<"ts" | "py" | "claude" | "guardrail">("ts");
   return (
     <section className="mb-10">
       <div className="mb-4 flex items-baseline justify-between">
@@ -610,6 +630,7 @@ function SnippetsSection() {
           <SnippetTab label="TypeScript" active={tab === "ts"} onClick={() => setTab("ts")} />
           <SnippetTab label="Python" active={tab === "py"} onClick={() => setTab("py")} />
           <SnippetTab label="Claude tool use" active={tab === "claude"} onClick={() => setTab("claude")} />
+          <SnippetTab label="Guardrail check" active={tab === "guardrail"} onClick={() => setTab("guardrail")} />
         </div>
         <pre className="p-4 text-xs leading-relaxed text-zinc-200 overflow-x-auto whitespace-pre">
           {SNIPPETS[tab]}

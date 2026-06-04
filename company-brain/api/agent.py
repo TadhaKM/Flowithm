@@ -6,6 +6,7 @@ Two route groups:
 """
 from __future__ import annotations
 
+import json
 import secrets
 import time
 from datetime import datetime, timezone
@@ -691,6 +692,254 @@ def execute_skill_endpoint(
         background.add_task(_maybe_trigger_drift_from_exception, body.skill_id, body.exception_note)
 
     return {"received": True, "execution_id": execution_id}
+
+
+# ---------------------------------------------------------------------------
+# /skills/check — guardrail layer
+# ---------------------------------------------------------------------------
+# Agents call this BEFORE taking an action that touches a documented process.
+# The endpoint finds the most relevant skill via semantic search, then asks
+# Claude whether the proposed action follows the documented rules / approvals
+# / exceptions. Failing closed is the default: if no skill matches above the
+# confidence floor (or if Claude is unavailable), the verdict is `allowed=false`
+# so a misfire can't sneak a destructive action through.
+
+GUARDRAIL_MODEL = "claude-sonnet-4-6"
+
+GUARDRAIL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "allowed": {
+            "type": "boolean",
+            "description": "True iff the proposed action follows the documented process and all required approvals are already covered.",
+        },
+        "reason": {
+            "type": "string",
+            "description": "One-sentence explanation citing the specific rule, approval, step, or exception that applies.",
+        },
+        "required_approvals": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Approvals that must be obtained before the action can proceed. Empty when allowed=true and no further sign-off is needed.",
+        },
+        "violations": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Decision rules the action would break. Empty when allowed=true.",
+        },
+        "suggested_action": {
+            "type": "string",
+            "description": "What the agent should do instead if not allowed. Empty string when allowed=true.",
+        },
+    },
+    "required": ["allowed", "reason", "required_approvals", "violations", "suggested_action"],
+    "additionalProperties": False,
+}
+
+GUARDRAIL_SYSTEM_PROMPT = """You are a compliance reviewer for a B2B SaaS company. You evaluate whether a proposed action by an AI agent follows the company's documented process.
+
+You will be given:
+  - A proposed action the agent wants to take.
+  - Optional context about the situation.
+  - The relevant company process — steps, decision_rules, approvals, exceptions.
+
+Decide:
+  - If the action requires an approval that hasn't happened yet: allowed=false, list the approval in required_approvals.
+  - If the action contradicts a decision_rule: allowed=false, list the rule verbatim in violations.
+  - If the action matches an exception that overrides the default process: allowed=true, explain in reason.
+  - If the action follows the process and no further approvals are needed: allowed=true.
+
+Cite the specific rule, step number, approval, or exception you relied on. Be specific — agents will surface your reason and suggested_action verbatim to operators. Never invent rules that aren't in the provided process."""
+
+
+class CheckRequest(BaseModel):
+    proposed_action: str = Field(
+        ...,
+        min_length=2,
+        description="What the agent is about to do, in plain English. e.g. 'Approve $2400 refund for customer who has been with us 6 weeks'.",
+    )
+    context: str | None = Field(
+        default=None,
+        description="Optional relevant context — customer plan, prior history, anything that informs which exception/rule applies.",
+    )
+
+
+@agent_app.post(
+    "/skills/check",
+    summary="Guardrail — does this proposed action follow the documented process?",
+    description=(
+        "Pre-action policy check. Semantically finds the most relevant skill, "
+        "then asks Claude to evaluate the proposed action against that skill's "
+        "decision_rules, approvals, and exceptions.\n\n"
+        "**Response shape:**\n"
+        "- `allowed` — true iff the action follows the process and all required "
+        "approvals are already covered.\n"
+        "- `reason` — one-sentence explanation citing the specific rule / approval / "
+        "exception that applies.\n"
+        "- `required_approvals` — approvals still needed before the action can proceed.\n"
+        "- `violations` — decision rules the action would break (empty when allowed).\n"
+        "- `suggested_action` — what to do instead if not allowed.\n"
+        "- `matched_skill` — the full skill JSON the verdict was based on, or `null` "
+        "when no skill matched above the confidence floor.\n"
+        "- `confidence` — `high` (raw similarity >= 0.75), `medium` (0.40-0.75), or "
+        "`low` (no skill matched).\n\n"
+        "**Fail-closed behaviour:** when no skill matches (`confidence: \"low\"`) or "
+        "when the AI service is unavailable, the verdict is `allowed=false` with "
+        "an escalation suggestion — agents should treat the absence of a policy "
+        "as a reason to escalate, not to proceed unchecked."
+    ),
+    responses={
+        200: {
+            "content": {
+                "application/json": {
+                    "example": {
+                        "allowed": False,
+                        "reason": "Refunds over $500 require CS lead approval before processing.",
+                        "required_approvals": [
+                            "CS lead via Slack DM with reason and Stripe charge ID"
+                        ],
+                        "violations": [],
+                        "suggested_action": "Route to CS lead for approval before processing the refund.",
+                        "matched_skill": {
+                            "id": "...",
+                            "process": "Customer refund handling",
+                            "...": "...",
+                        },
+                        "confidence": "high",
+                    }
+                }
+            }
+        }
+    },
+)
+def check_skill_endpoint(
+    body: CheckRequest,
+    request: Request,
+    background: BackgroundTasks,
+    api_key=ApiKeyDep,
+) -> dict[str, Any]:
+    proposed = (body.proposed_action or "").strip()
+    if not proposed:
+        raise _err(400, "INVALID_REQUEST", "proposed_action is empty.")
+
+    org_id = getattr(request.state, "org_id", None) or None
+
+    # Embed the action + context together — the context often carries the
+    # signal that picks the right policy (e.g. "Enterprise plan" → Enterprise
+    # refund exception path vs the default refund flow).
+    search_text = (
+        proposed if not body.context else f"{proposed}\n\nContext: {body.context}"
+    )
+    try:
+        embedding = embed_query(search_text)
+    except ValueError:
+        raise _err(400, "INVALID_REQUEST", "proposed_action is empty.")
+    except Exception as exc:
+        raise _err(503, "EMBEDDING_UNAVAILABLE", f"Embedding service error: {exc}")
+
+    matches = match_skills_by_embedding(embedding, k=3, org_id=org_id)
+    if not matches or float(matches[0].get("similarity") or 0.0) < LOW_CONF:
+        # Fail closed — no documented policy applies.
+        return {
+            "allowed": False,
+            "reason": "No documented company process matched this action — escalate to a human.",
+            "required_approvals": ["Human review (no matching policy on file)"],
+            "violations": [],
+            "suggested_action": "Escalate to a human reviewer. No documented process covers this action.",
+            "matched_skill": None,
+            "confidence": "low",
+        }
+
+    top = matches[0]
+    similarity = float(top.get("similarity") or 0.0)
+    skill = _row_to_agent_skill(top)
+    confidence = "high" if similarity >= HIGH_CONF else "medium"
+
+    # Trim the skill to just the fields Claude needs to reason about — leaves
+    # out id / version / sources noise so the model focuses on policy content.
+    skill_for_claude = {
+        "process": skill["process"],
+        "description": skill.get("description") or "",
+        "trigger": skill.get("trigger") or "",
+        "steps": skill.get("steps") or [],
+        "decision_rules": skill.get("decision_rules") or [],
+        "approvals": skill.get("approvals") or [],
+        "exceptions": skill.get("exceptions") or [],
+    }
+
+    user_message = (
+        f"Proposed action: {proposed}\n\n"
+        f"Context: {body.context.strip() if body.context else '(none provided)'}\n\n"
+        f"Company process:\n{json.dumps(skill_for_claude, indent=2)}"
+    )
+
+    from brain.anthropic_client import CircuitOpenError, messages_create
+    from brain.drift import _get_anthropic
+
+    def _fail_closed(reason: str, suggested: str) -> dict[str, Any]:
+        return {
+            "allowed": False,
+            "reason": reason,
+            "required_approvals": ["Human review"],
+            "violations": [],
+            "suggested_action": suggested,
+            "matched_skill": skill,
+            "confidence": confidence,
+        }
+
+    try:
+        client = _get_anthropic()
+        message = messages_create(
+            client,
+            model=GUARDRAIL_MODEL,
+            max_tokens=2048,
+            system=[
+                {
+                    "type": "text",
+                    "text": GUARDRAIL_SYSTEM_PROMPT,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            output_config={
+                "format": {"type": "json_schema", "schema": GUARDRAIL_SCHEMA},
+            },
+            messages=[{"role": "user", "content": user_message}],
+        )
+    except CircuitOpenError as exc:
+        return _fail_closed(
+            f"Guardrail service temporarily unavailable: {exc}",
+            "Escalate to a human reviewer until the guardrail is back online.",
+        )
+    except Exception as exc:
+        return _fail_closed(
+            f"Guardrail check failed: {exc}",
+            "Escalate to a human reviewer.",
+        )
+
+    if message.stop_reason == "refusal":
+        return _fail_closed(
+            "Guardrail could not complete the check for safety reasons.",
+            "Escalate to a human reviewer.",
+        )
+
+    text = next((b.text for b in message.content if b.type == "text"), "")
+    try:
+        verdict = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return _fail_closed(
+            "Guardrail returned an unparseable verdict.",
+            "Escalate to a human reviewer.",
+        )
+
+    return {
+        "allowed": bool(verdict.get("allowed")),
+        "reason": str(verdict.get("reason") or ""),
+        "required_approvals": list(verdict.get("required_approvals") or []),
+        "violations": list(verdict.get("violations") or []),
+        "suggested_action": str(verdict.get("suggested_action") or ""),
+        "matched_skill": skill,
+        "confidence": confidence,
+    }
 
 
 # ---------------------------------------------------------------------------
