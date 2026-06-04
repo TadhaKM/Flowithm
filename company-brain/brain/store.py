@@ -409,6 +409,27 @@ def get_skill_reviewed_at(skill_id: str, org_id: str | None = None) -> str | Non
     return rows[0].get("reviewed_at")
 
 
+def get_skills_reviewed_at_map(
+    skill_ids: list[str], org_id: str | None = None
+) -> dict[str, str | None]:
+    """Bulk version — fetch reviewed_at for many skill ids in one query.
+    Returns {id: reviewed_at_iso_or_None}. Missing ids are simply absent
+    from the map. Used by /skills/match for combined-score re-ranking,
+    where one query for the whole top-K beats N round-trips."""
+    if not skill_ids:
+        return {}
+    client = get_client()
+    result = (
+        client.table(SKILLS_TABLE)
+        .select("id, reviewed_at")
+        .in_("id", skill_ids)
+        .eq("org_id", org_id or _default_org_id())
+        .execute()
+    )
+    rows = result.data or []
+    return {str(r["id"]): r.get("reviewed_at") for r in rows if r.get("id")}
+
+
 def mark_needs_review(skill_id: str, reason: str, org_id: str | None = None) -> None:
     """Idempotently flag a skill for human review. Sets needs_review=true,
     needs_review_reason, and stale_flagged_at. Safe to call on an already-

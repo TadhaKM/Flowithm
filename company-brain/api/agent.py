@@ -28,7 +28,7 @@ from brain.store import (
     deactivate_api_key,
     find_similar_workflow,
     get_skill_by_name_fuzzy,
-    get_skill_reviewed_at,
+    get_skills_reviewed_at_map,
     insert_api_key,
     insert_execution,
     list_api_keys,
@@ -46,6 +46,56 @@ LOW_CONF = 0.40
 # Used by the freshness envelope on /skills/match and /skills/{name}.
 FRESH_DAYS = 30
 AGING_DAYS = 90
+
+# Recency-weighted ranking on /skills/match. Top-K results are fetched by
+# raw cosine similarity, then re-ranked by:
+#   combined_score = similarity * SIMILARITY_WEIGHT + recency * RECENCY_WEIGHT
+# So a slightly-less-similar but recently-confirmed workflow beats a very-
+# similar 8-month-old one.
+SIMILARITY_WEIGHT = 0.7
+RECENCY_WEIGHT = 0.3
+TOP_K_FOR_RERANK = 10
+# (max_days, score) — first matching band wins. Anything older than the
+# last band's max_days falls through to RECENCY_FLOOR.
+RECENCY_BANDS: list[tuple[int, float]] = [
+    (30, 1.0),
+    (90, 0.7),
+    (180, 0.4),
+]
+RECENCY_FLOOR = 0.1
+
+
+def _days_since_confirmed(
+    reviewed_at: str | None, generated_at: str | None
+) -> int | None:
+    """Days between max(reviewed_at, generated_at) — fallback chain — and now
+    (UTC). Returns None if both are missing or unparseable. Shared by the
+    freshness envelope and the recency-score helper."""
+    ts = reviewed_at or generated_at
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+    # Supabase timestamptz round-trips with a tz, but test fixtures sometimes
+    # hand back naive strings — assume UTC so the subtraction can't blow up.
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return max(0, (datetime.now(timezone.utc) - dt).days)
+
+
+def _recency_score(reviewed_at: str | None, generated_at: str | None) -> float:
+    """Map age-in-days to a 0-1 recency score using RECENCY_BANDS. Skills
+    whose timestamps can't be parsed get the floor (0.1) — a small but
+    non-zero weight so they still rank below any dated peer."""
+    days = _days_since_confirmed(reviewed_at, generated_at)
+    if days is None:
+        return RECENCY_FLOOR
+    for max_days, score in RECENCY_BANDS:
+        if days <= max_days:
+            return score
+    return RECENCY_FLOOR
 
 
 def _freshness_envelope(
@@ -78,21 +128,14 @@ def _freshness_envelope(
             "source_freshness": None,
             "freshness_warning": None,
         }
-    try:
-        confirmed_dt = datetime.fromisoformat(str(last_confirmed).replace("Z", "+00:00"))
-    except (ValueError, AttributeError):
+    days = _days_since_confirmed(reviewed_at, generated_at)
+    if days is None:
         return {
             "last_confirmed_at": last_confirmed,
             "days_since_confirmed": None,
             "source_freshness": None,
             "freshness_warning": None,
         }
-    # Supabase timestamptz round-trips with a tz, but test fixtures sometimes
-    # hand back naive strings — assume UTC so the subtraction can't blow up.
-    if confirmed_dt.tzinfo is None:
-        confirmed_dt = confirmed_dt.replace(tzinfo=timezone.utc)
-
-    days = max(0, (datetime.now(timezone.utc) - confirmed_dt).days)
 
     if days < FRESH_DAYS:
         return {
@@ -407,13 +450,23 @@ def list_skills_endpoint(
     summary="Semantic match — natural-language → workflow",
     description=(
         "Embeds the query (voyage-3) and runs cosine similarity over "
-        "skills.summary_embedding. Returns the top hit with a confidence "
-        "tier ('high' >= 0.75, 'medium' 0.40-0.75). Below 0.40, returns "
-        "404 SKILL_NOT_FOUND with up to 3 closest suggestions.\n\n"
+        "skills.summary_embedding. Fetches the top 10 raw candidates, then "
+        "**re-ranks by a recency-weighted combined score** so a slightly-"
+        "less-similar but recently-confirmed workflow ranks above a very-"
+        "similar but months-old one.\n\n"
+        "**Ranking** (all three exposed at the top level of the response):\n"
+        "- `similarity_score` — raw cosine similarity 0-1.\n"
+        "- `recency_score` — bucketed by age of `last_confirmed_at`: "
+        "`1.0` (<=30d), `0.7` (<=90d), `0.4` (<=180d), `0.1` (older / unknown).\n"
+        "- `combined_score = similarity_score * 0.7 + recency_score * 0.3`. "
+        "Re-ranking is restricted to candidates with `similarity_score >= 0.40` "
+        "so recency cannot promote an irrelevant match.\n\n"
+        "**Confidence tier** is computed from `similarity_score`: "
+        "`high` (>=0.75), `medium` (0.40-0.75). If no candidate clears 0.40, "
+        "returns 404 SKILL_NOT_FOUND with up to 3 closest suggestions.\n\n"
         "**Freshness envelope** (top-level fields):\n"
-        "- `last_confirmed_at` — ISO8601 of `reviewed_at` if set, else `generated_at`. "
-        "When a workflow was last vouched for as accurate.\n"
-        "- `days_since_confirmed` — integer days between `last_confirmed_at` and now (UTC).\n"
+        "- `last_confirmed_at` — ISO8601 of `reviewed_at` if set, else `generated_at`.\n"
+        "- `days_since_confirmed` — integer days vs. now (UTC).\n"
         "- `source_freshness` — `fresh` (<30d) | `aging` (30-90d) | `stale` (>=90d). "
         "Agents should treat `stale` workflows as advisory and escalate.\n"
         "- `freshness_warning` — null when fresh; a human-readable advisory when aging; "
@@ -428,17 +481,16 @@ def list_skills_endpoint(
                 "application/json": {
                     "example": {
                         "matched": True,
-                        "confidence": "high",
-                        "similarity_score": 0.83,
+                        "confidence": "medium",
+                        "similarity_score": 0.62,
+                        "recency_score": 1.0,
+                        "combined_score": 0.734,
                         "query": "customer wants a refund after 45 days",
                         "skill": {"id": "...", "process": "Customer refund handling", "...": "..."},
-                        "last_confirmed_at": "2026-02-01T12:00:00+00:00",
-                        "days_since_confirmed": 103,
-                        "source_freshness": "stale",
-                        "freshness_warning": (
-                            "This workflow has not been reviewed in 103 days and may be "
-                            "outdated. Escalate to a human rather than acting automatically."
-                        ),
+                        "last_confirmed_at": "2026-04-20T12:00:00+00:00",
+                        "days_since_confirmed": 25,
+                        "source_freshness": "fresh",
+                        "freshness_warning": None,
                     }
                 }
             }
@@ -472,7 +524,9 @@ def match_skill_endpoint(
     except Exception as exc:
         raise _err(503, "EMBEDDING_UNAVAILABLE", f"Embedding service error: {exc}")
 
-    matches = match_skills_by_embedding(embedding, k=3, org_id=org_id)
+    # Fetch a wider pool (top 10) so we have room to re-rank by recency.
+    # The pool is still ordered by raw cosine similarity at this point.
+    matches = match_skills_by_embedding(embedding, k=TOP_K_FOR_RERANK, org_id=org_id)
     if not matches:
         log_match_request(background, request, q, None)
         raise _err(
@@ -481,18 +535,30 @@ def match_skill_endpoint(
             suggestions=[],
         )
 
-    top = matches[0]
-    score = float(top.get("similarity") or 0.0)
+    # Bulk-fetch reviewed_at for every candidate in one round-trip; the
+    # match_skills RPC doesn't return it. _recency_score falls back to
+    # generated_at when reviewed_at is None.
+    candidate_ids = [str(m.get("id") or "") for m in matches if m.get("id")]
+    reviewed_map = get_skills_reviewed_at_map(candidate_ids, org_id=org_id)
 
-    if score < LOW_CONF:
+    # Filter the pool to candidates above the confidence floor BEFORE
+    # re-ranking — otherwise a fresh-but-irrelevant skill (e.g. sim=0.20,
+    # recency=1.0 → combined=0.44) could beat a clearly-relevant one
+    # (sim=0.55, recency=0.1 → combined=0.41). Recency is meant to break
+    # ties among relevant candidates, not promote noise.
+    relevant = [m for m in matches if float(m.get("similarity") or 0.0) >= LOW_CONF]
+
+    if not relevant:
         log_match_request(background, request, q, None)
+        # Suggestions stay ordered by raw similarity ("closest 3"), matching
+        # what a developer would expect from "no good match".
         suggestions = [
             {
                 "id": str(m.get("id") or ""),
                 "process": m.get("process_name") or "",
-                "similarity_score": float(m.get("similarity") or 0.0),
+                "similarity_score": round(float(m.get("similarity") or 0.0), 4),
             }
-            for m in matches
+            for m in matches[:3]
         ]
         raise _err(
             404, "SKILL_NOT_FOUND",
@@ -500,18 +566,28 @@ def match_skill_endpoint(
             suggestions=suggestions,
         )
 
-    confidence = "high" if score >= HIGH_CONF else "medium"
+    # Score every relevant candidate and re-rank by combined_score.
+    def _score(m: dict[str, Any]) -> tuple[float, float, float]:
+        sim = float(m.get("similarity") or 0.0)
+        rec = _recency_score(
+            reviewed_map.get(str(m.get("id") or "")),
+            m.get("generated_at"),
+        )
+        combined = sim * SIMILARITY_WEIGHT + rec * RECENCY_WEIGHT
+        return sim, rec, combined
+
+    scored = [(m, _score(m)) for m in relevant]
+    scored.sort(key=lambda pair: pair[1][2], reverse=True)
+    top, (sim_score, rec_score, combined_score) = scored[0]
+
+    confidence = "high" if sim_score >= HIGH_CONF else "medium"
     skill = _row_to_agent_skill(top)
     log_match_request(background, request, q, skill["id"])
 
-    # The match_skills RPC doesn't return reviewed_at; fetch it for the top
-    # hit so the freshness envelope can use "reviewed_at if set, else
-    # generated_at" per the spec.
-    reviewed_at = get_skill_reviewed_at(skill["id"], org_id=org_id)
     freshness = _freshness_envelope(
         skill_id=skill["id"],
         generated_at=top.get("generated_at"),
-        reviewed_at=reviewed_at,
+        reviewed_at=reviewed_map.get(skill["id"]),
         needs_review_already=bool(top.get("needs_review")),
         background=background,
         org_id=org_id,
@@ -524,7 +600,9 @@ def match_skill_endpoint(
     return {
         "matched": True,
         "confidence": confidence,
-        "similarity_score": round(score, 4),
+        "similarity_score": round(sim_score, 4),
+        "recency_score": round(rec_score, 4),
+        "combined_score": round(combined_score, 4),
         "query": q,
         "skill": skill,
         **freshness,
