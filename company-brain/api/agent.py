@@ -514,7 +514,7 @@ def match_skill_endpoint(
     request: Request,
     background: BackgroundTasks,
     api_key=ApiKeyDep,
-    q: str = Query(..., min_length=2, description="Natural-language description of the situation."),
+    q: str = Query(..., min_length=2, max_length=2000, description="Natural-language description of the situation."),
 ) -> dict[str, Any]:
     started = time.perf_counter()
     org_id = getattr(request.state, "org_id", None) or None
@@ -653,10 +653,10 @@ def get_skill_endpoint(
 
 
 class ExecuteRequest(BaseModel):
-    skill_id: str
+    skill_id: str = Field(..., max_length=128)
     step_number: int | None = None
     outcome: str = Field(..., description="One of: completed | escalated | exception_triggered")
-    exception_note: str | None = None
+    exception_note: str | None = Field(default=None, max_length=4000)
     duration_seconds: int | None = None
 
 
@@ -756,10 +756,12 @@ class CheckRequest(BaseModel):
     proposed_action: str = Field(
         ...,
         min_length=2,
+        max_length=4000,
         description="What the agent is about to do, in plain English. e.g. 'Approve $2400 refund for customer who has been with us 6 weeks'.",
     )
     context: str | None = Field(
         default=None,
+        max_length=8000,
         description="Optional relevant context — customer plan, prior history, anything that informs which exception/rule applies.",
     )
 
