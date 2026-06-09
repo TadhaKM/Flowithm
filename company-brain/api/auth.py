@@ -235,7 +235,19 @@ def verify_admin_token(request: Request) -> None:
                 "INVALID_API_KEY",
                 "X-Admin-Sig is required when X-Org-ID is set.",
             )
-        _verify_admin_sig(org_id, admin_sig, expected)
+        _verify_admin_sig(org_id, admin_sig, _admin_signing_key())
+
+
+def _admin_signing_key() -> str:
+    """Key for the X-Admin-Sig HMAC — independent from ADMIN_TOKEN so a leaked
+    admin token can't be used to forge org-binding signatures. Falls back to
+    ADMIN_TOKEN when ADMIN_SIGNING_KEY is unset so single-secret deploys keep
+    working during migration; set ADMIN_SIGNING_KEY (a distinct random value)
+    to make the two secrets truly independent."""
+    return (
+        os.environ.get("ADMIN_SIGNING_KEY", "").strip()
+        or os.environ.get("ADMIN_TOKEN", "").strip()
+    )
 
 
 def _verify_admin_sig(org_id: str, sig_header: str, key: str) -> None:

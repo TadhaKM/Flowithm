@@ -17,6 +17,11 @@ import { createClient as createAuthClient } from "./supabase-server";
 import { getSupabase } from "./supabase";
 
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
+// Independent secret for the X-Admin-Sig HMAC so a leaked ADMIN_TOKEN can't
+// forge org-binding signatures. Falls back to ADMIN_TOKEN when unset to keep
+// single-secret deploys working during migration. Must match the FastAPI
+// verifier's _admin_signing_key() resolution and the Slack bot's signer.
+const ADMIN_SIGNING_KEY = process.env.ADMIN_SIGNING_KEY || ADMIN_TOKEN;
 const FALLBACK_ORG_ID = process.env.FLOWITHM_DEFAULT_ORG_ID || "";
 
 
@@ -77,7 +82,7 @@ export async function orgHeaders(opts?: { admin?: boolean; json?: boolean }): Pr
     const orgForSig = headers["X-Org-ID"] || "";
     const ts = Math.floor(Date.now() / 1000).toString();
     const sig = crypto
-      .createHmac("sha256", ADMIN_TOKEN)
+      .createHmac("sha256", ADMIN_SIGNING_KEY)
       .update(`${orgForSig}:${ts}`)
       .digest("hex");
     headers["X-Admin-Sig"] = `${ts}:${sig}`;
