@@ -51,7 +51,16 @@ def _api_headers() -> dict:
     """Build the Authorization + X-Org-ID headers every FastAPI request
     from the bot needs. The internal endpoints are admin-gated post the
     C-4 lockdown — without the admin token every bot HTTP call would 401.
+
+    When both ADMIN_TOKEN and ORG_ID are set we also attach an X-Admin-Sig
+    HMAC over `org_id:timestamp` (keyed by ADMIN_TOKEN), matching the
+    dashboard proxy. FastAPI's admin gate now *requires* this signature
+    whenever an X-Org-ID header is present.
     """
+    import hashlib
+    import hmac
+    import time
+
     headers: dict[str, str] = {}
     admin_token = os.environ.get("ADMIN_TOKEN", "")
     org_id = os.environ.get("ORG_ID", "")
@@ -59,6 +68,14 @@ def _api_headers() -> dict:
         headers["Authorization"] = f"Bearer {admin_token}"
     if org_id:
         headers["X-Org-ID"] = org_id
+        if admin_token:
+            ts = str(int(time.time()))
+            sig = hmac.new(
+                admin_token.encode("utf-8"),
+                f"{org_id}:{ts}".encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest()
+            headers["X-Admin-Sig"] = f"{ts}:{sig}"
     return headers
 
 MIN_WORDS = 20

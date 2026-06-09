@@ -220,12 +220,21 @@ def verify_admin_token(request: Request) -> None:
     if not _constant_time_eq(token, expected):
         raise _err(401, "INVALID_API_KEY", "Invalid admin token.")
 
-    # H-NEW-2: verify the HMAC signature on X-Org-ID so a leaked ADMIN_TOKEN
-    # can't target arbitrary tenants via raw curl. The dashboard proxy signs
-    # org_id:timestamp with the ADMIN_TOKEN as key.
+    # H-NEW-2 (hardened): verify the HMAC signature on X-Org-ID so a leaked
+    # ADMIN_TOKEN can't target arbitrary tenants via raw curl. The dashboard
+    # proxy and the Slack bot both sign org_id:timestamp with the ADMIN_TOKEN
+    # as key. The signature is REQUIRED whenever an X-Org-ID header is present
+    # — previously it was only checked when the caller chose to send a sig, so
+    # the cross-tenant protection was trivially bypassed by omitting the header.
     org_id = request.headers.get("x-org-id") or ""
-    admin_sig = request.headers.get("x-admin-sig") or ""
-    if org_id and admin_sig:
+    if org_id:
+        admin_sig = request.headers.get("x-admin-sig") or ""
+        if not admin_sig:
+            raise _err(
+                401,
+                "INVALID_API_KEY",
+                "X-Admin-Sig is required when X-Org-ID is set.",
+            )
         _verify_admin_sig(org_id, admin_sig, expected)
 
 

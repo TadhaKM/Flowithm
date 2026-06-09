@@ -33,7 +33,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from brain.logger import get_logger
 from brain.store import DEFAULT_ORG_ID
@@ -109,18 +109,21 @@ def _cached_chunk_count() -> int:
     return _chunk_count_cache["value"]  # type: ignore[return-value]
 
 
+# Input bounds: these fields flow into Voyage embeddings and Claude
+# completions. Even though every endpoint here is admin-gated, an unbounded
+# question/content/top_k is a cost-amplification and memory risk, so cap them.
 class QueryRequest(BaseModel):
-    question: str
-    top_k: int = 6
+    question: str = Field(..., max_length=8000)
+    top_k: int = Field(6, ge=1, le=50)
 
 
 class SkillsRequest(BaseModel):
-    process_name: str
+    process_name: str = Field(..., max_length=500)
 
 
 class WorkflowRequest(BaseModel):
-    name: str
-    content: str
+    name: str = Field(..., max_length=200)
+    content: str = Field(..., max_length=100_000)
     # Optional provenance — used by the Slack bot to record channel/thread.
     source: str | None = None
     source_metadata: dict | None = None
@@ -128,7 +131,7 @@ class WorkflowRequest(BaseModel):
 
 class ConflictResolveRequest(BaseModel):
     action: str  # 'accept' | 'dismiss' | 'snooze'
-    resolved_by: str
+    resolved_by: str = Field(..., max_length=200)
 
 
 # ---------------------------------------------------------------------------

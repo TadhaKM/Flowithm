@@ -679,6 +679,16 @@ def execute_skill_endpoint(
         raise _err(400, "INVALID_REQUEST", f"unknown outcome: {body.outcome!r}")
 
     org_id = getattr(request.state, "org_id", None) or None
+
+    # Verify the skill belongs to THIS key's org before recording an
+    # execution against it. Without this an agent could log outcomes (and
+    # trigger drift checks) against another tenant's skill_id, and the drift
+    # path below would otherwise resolve the skill in the default org.
+    from brain.store import get_workflow
+
+    if not get_workflow(body.skill_id, org_id=org_id):
+        raise _err(404, "SKILL_NOT_FOUND", f"No skill found for id {body.skill_id!r}")
+
     execution_id = insert_execution(
         skill_id=body.skill_id,
         step_number=body.step_number,
@@ -689,7 +699,12 @@ def execute_skill_endpoint(
     )
 
     if body.exception_note:
-        background.add_task(_maybe_trigger_drift_from_exception, body.skill_id, body.exception_note)
+        background.add_task(
+            _maybe_trigger_drift_from_exception,
+            body.skill_id,
+            body.exception_note,
+            org_id,
+        )
 
     return {"received": True, "execution_id": execution_id}
 
@@ -988,13 +1003,15 @@ def _workflow_to_agent_skill(workflow: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _maybe_trigger_drift_from_exception(skill_id: str, exception_note: str) -> None:
+def _maybe_trigger_drift_from_exception(
+    skill_id: str, exception_note: str, org_id: str | None = None
+) -> None:
     """If Claude says the note isn't already covered by the skill, kick off a drift check."""
     try:
         from brain.drift import schedule_drift_check
         from brain.store import get_workflow
 
-        skill = get_workflow(skill_id)
+        skill = get_workflow(skill_id, org_id=org_id)
         if not skill:
             return
 
@@ -1015,6 +1032,6 @@ def _maybe_trigger_drift_from_exception(skill_id: str, exception_note: str) -> N
         )
         text = "".join(b.text for b in msg.content if hasattr(b, "text")).strip().upper()
         if text.startswith("NO"):
-            schedule_drift_check(exception_note, skill)
+            schedule_drift_check(exception_note, skill, org_id=org_id)
     except Exception as exc:
         print(f"[agent-api] _maybe_trigger_drift_from_exception failed: {exc}", flush=True)

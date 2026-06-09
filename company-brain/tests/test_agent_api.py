@@ -136,6 +136,13 @@ def test_match_no_skills_returns_404(test_client, mock_supabase, mock_voyage, va
 def test_execute_persists_outcome(test_client, mock_supabase, valid_api_key):
     """POST /skills/execute writes one row into executions."""
     _seed_active_key(mock_supabase, valid_api_key)
+    # The endpoint now verifies the skill belongs to the key's org before
+    # recording an execution, so seed a matching skill row.
+    mock_supabase.rows_by_table["skills"] = [{
+        "id": "skill-99",
+        "process_name": "Test process",
+        "org_id": "00000000-0000-0000-0000-000000000001",
+    }]
 
     payload = {
         "skill_id": "skill-99",

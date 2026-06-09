@@ -6,9 +6,24 @@ the /api/v1/skills/{process_name} exact-then-fuzzy lookup.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import time
 
 import pytest
+
+
+def _admin_org_headers(org_id: str, token: str = "test-admin-token") -> dict[str, str]:
+    """Admin auth header plus the X-Admin-Sig the gate now requires whenever
+    X-Org-ID is supplied (HMAC of org_id:timestamp keyed by ADMIN_TOKEN)."""
+    ts = str(int(time.time()))
+    sig = hmac.new(token.encode(), f"{org_id}:{ts}".encode(), hashlib.sha256).hexdigest()
+    return {
+        "Authorization": f"Bearer {token}",
+        "X-Org-ID": org_id,
+        "X-Admin-Sig": f"{ts}:{sig}",
+    }
 
 
 @pytest.fixture
@@ -300,7 +315,7 @@ def test_revoke_key_happy_path(test_client, mock_supabase, valid_api_key):
     _seed_key(mock_supabase, valid_api_key)
     res = test_client.delete(
         "/api/v1/keys/k1",
-        headers={"Authorization": "Bearer test-admin-token", "X-Org-ID": "00000000-0000-0000-0000-000000000001"},
+        headers=_admin_org_headers("00000000-0000-0000-0000-000000000001"),
     )
     assert res.status_code == 200
     assert res.json()["revoked"] == "k1"
