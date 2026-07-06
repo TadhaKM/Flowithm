@@ -3,10 +3,11 @@
 // to /login for any protected route.
 //
 // Public paths (no session required):
-//   /login, /signup, /api/*, /_next/*, /favicon.ico
+//   / (landing page), /login, /signup, /privacy, /api/*, /_next/*, /favicon.ico
 //
-// Everything else — including /brain/*, /setup, /onboarding/*, / — needs
-// a valid Supabase Auth session.
+// Everything else — including /brain/*, /setup, /onboarding/* — needs
+// a valid Supabase Auth session. The root page itself decides what to
+// render (landing page vs. generator app) based on the session.
 import { createServerClient } from "@supabase/ssr";
 import { NextRequest, NextResponse } from "next/server";
 
@@ -58,7 +59,11 @@ export async function middleware(req: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
 
-  if (!user) {
+  // Public pages: still run the session refresh above (keeps cookies
+  // fresh for the server-rendered root page), but never redirect.
+  const isPublic = pathname === "/" || pathname === "/privacy";
+
+  if (!user && !isPublic) {
     const url = req.nextUrl.clone();
     url.pathname = "/login";
     return NextResponse.redirect(url);
