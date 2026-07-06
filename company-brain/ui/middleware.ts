@@ -26,14 +26,31 @@ export async function middleware(req: NextRequest) {
     return NextResponse.next();
   }
 
+  // Public pages never require a session; they must render even if the
+  // Supabase env isn't configured yet.
+  const isPublic = pathname === "/" || pathname === "/privacy";
+
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+  // Missing env would make createServerClient throw, which Vercel reports
+  // as MIDDLEWARE_INVOCATION_FAILED and takes the whole site down. Fail
+  // soft instead: treat the visitor as signed out.
+  if (!supabaseUrl || !supabaseAnonKey) {
+    if (isPublic) return NextResponse.next();
+    const url = req.nextUrl.clone();
+    url.pathname = "/login";
+    return NextResponse.redirect(url);
+  }
+
   // Create a Supabase client that reads/writes session cookies on the
   // request/response pair. The setAll callback updates both so the
   // refreshed token propagates to the browser.
   let response = NextResponse.next({ request: req });
 
   const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    supabaseUrl,
+    supabaseAnonKey,
     {
       cookies: {
         getAll() {
@@ -54,14 +71,16 @@ export async function middleware(req: NextRequest) {
 
   // getUser() validates the JWT with the Supabase auth server — never
   // trust getSession() alone for gate checks since the JWT could be
-  // tampered with client-side.
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  // Public pages: still run the session refresh above (keeps cookies
-  // fresh for the server-rendered root page), but never redirect.
-  const isPublic = pathname === "/" || pathname === "/privacy";
+  // tampered with client-side. A network hiccup to the auth server must
+  // not crash the middleware, so treat failures as "no user".
+  let user = null;
+  try {
+    ({
+      data: { user },
+    } = await supabase.auth.getUser());
+  } catch {
+    user = null;
+  }
 
   if (!user && !isPublic) {
     const url = req.nextUrl.clone();
