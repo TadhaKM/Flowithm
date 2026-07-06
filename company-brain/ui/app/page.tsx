@@ -7,10 +7,17 @@ import { LandingPage } from "@/components/LandingPage";
 export const dynamic = "force-dynamic";
 
 export default async function Home() {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  // The landing page must render even when Supabase env/config is missing
+  // or the auth server is unreachable — fail soft to signed-out.
+  let user = null;
+  try {
+    const supabase = await createClient();
+    ({
+      data: { user },
+    } = await supabase.auth.getUser());
+  } catch {
+    user = null;
+  }
 
   return user ? <GeneratorApp /> : <LandingPage />;
 }
