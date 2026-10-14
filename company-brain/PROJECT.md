@@ -171,6 +171,44 @@ which resolves the org from the Supabase Auth session → `users` table).
 - `/api/admin/ingest` — GET status + POST trigger
 - `/api/admin/workflows/generate` — POST → FastAPI `/workflows/generate` (used by onboarding step 3)
 
+### Mock backend (`ui/lib/backend.ts`, `ui/lib/mock/`)
+
+Every proxy route calls the backend through `backendFetch(path, init)`
+instead of `fetch(FLOWITHM_API_URL + path)`. In **mock mode** that runs
+`lib/mock/backend.ts` in-process, so the dashboard is fully usable with
+only Supabase behind it — no FastAPI, Claude, or Voyage. Mock mode is on
+when `FLOWITHM_MOCK_BACKEND` is truthy, or when it's unset and
+`FLOWITHM_API_URL` is unset too.
+
+- **Storage:** the same Supabase tables the real backend uses, scoped by
+  the `X-Org-ID` the proxies inject — persists across serverless
+  invocations and stays tenant-isolated. The mock is not an HTTP route;
+  it trusts `X-Org-ID` only because the caller is our own server code.
+- **Endpoints mirrored:** `/setup`, `/workflows/generate`,
+  `/workflows/{id}`, `/history` (GET/DELETE), `/conflicts` + resolve
+  (accept/dismiss/snooze), `/skills/{id}/conflicts`, `/skills/{id}/review`,
+  `/ingest/status` + `/ingest/trigger`, `/sources` CRUD + validate,
+  `/api/v1/keys` (GET/POST/DELETE), `/api/v1/skills/match`, `/demo/{slug}`.
+  Same response shapes and `{error, code, docs}` envelope as FastAPI.
+- **Heuristics instead of models** (`lib/mock/extract.ts`): workflow
+  generation pattern-matches pasted text into `WORKFLOW_SCHEMA`;
+  `/skills/match` scores by keyword overlap re-ranked with the real
+  recency bands; accepting a conflict swaps the matching rule text for
+  `suggested_update` (or appends it) and writes a new version.
+- **Demo data** (`lib/mock/seed.ts`): any org with no skills and no ingest
+  runs is seeded with 5 Loopline workflows (one stale), 3 conflicts, 3
+  sources, an ingest run, a demo API key and ~2 weeks of agent traffic.
+  *Sync now* records a run and sometimes "discovers" a new conflict.
+- **Self-healing signup:** in mock mode `getOrgIdFromSession()` creates an
+  org (and the `users` link) for a signed-in user who has none, so
+  half-finished signups land on a working dashboard.
+- Source configs are stored with secrets replaced by `***` — mock mode
+  never contacts the provider. Keys are bcrypt-hashed (`bcryptjs`) so
+  they stay valid if the real backend is switched back on.
+- `/brain/[id]` Re-extract and `/workflow/[id]` now go through the Next
+  proxies (`/api/admin/workflows/generate`, `/api/brain/{id}`) instead of
+  calling `NEXT_PUBLIC_API_URL` from the browser.
+
 `ui/middleware.ts` validates the Supabase Auth session on every request
 (via `getUser()`) and redirects unauthenticated visitors to `/login`.
 Public paths bypassed: `/login`, `/signup`, `/api/*`, `/_next/*`,
@@ -342,6 +380,7 @@ Must be set independently — Next.js doesn't read the parent `.env`.
 | `FLOWITHM_API_URL` | No | FastAPI backend URL for server-side proxy routes. |
 | `FLOWITHM_PLAYGROUND_KEY` | No | Minted key for the live API playground. |
 | `FLOWITHM_DEFAULT_ORG_ID` | No | Single-tenant escape hatch — skip auth for org resolution. |
+| `FLOWITHM_MOCK_BACKEND` | No | `true` runs the in-process mock backend (Supabase only, no FastAPI). `false` forces the real backend. Unset → mock iff `FLOWITHM_API_URL` is unset. |
 
 ---
 
@@ -473,6 +512,7 @@ authoritative; full message bodies via `git show <hash>`.
 | `a01d1de` | Schema bug fix: hoist `alter table chunks add column if not exists org_id …` and `alter table skills add column if not exists org_id …` above the indexes that reference them (`chunks_org_content_hash_idx`, `skills_org_process_active_idx`). The original ordering created the indexes ~500 lines before the multi-tenancy block added the columns, so a fresh `schema.sql` run aborted with `ERROR: 42703: column "org_id" does not exist`. Idempotent — re-running on an already-migrated DB is a no-op. |
 | `pending` | Security audit hardening (High): input-size bounds on the public agent API (cost-amplification DoS + prompt-injection surface) — `/skills/check` `proposed_action` (max 4000) + `context` (max 8000), `/skills/match` `q` (max 2000), `/skills/execute` `exception_note` (max 4000) + `skill_id` (max 128). These fields feed user text straight into Voyage/Claude and were previously unbounded behind only the 100/min per-key rate limit. |
 | `pending` | Security audit hardening (Medium): **SA-1** `/skills/execute` now verifies `skill_id` belongs to the caller's org before recording an execution, and threads `org_id` into the drift trigger (`_maybe_trigger_drift_from_exception` → `get_workflow(skill_id, org_id=…)` → `schedule_drift_check(..., org_id=…)`) so a stolen/foreign skill_id can't log outcomes or run drift against another tenant / the default org. **SA-2** clamp `QueryRequest.top_k` to 1–50 and cap `question` (8000); cap `SkillsRequest.process_name` (500), `WorkflowRequest.name` (200) + `content` (100000), `ConflictResolveRequest.resolved_by` (200). **SA-3** `X-Admin-Sig` is now **required** whenever an `X-Org-ID` header is present (previously only checked when the caller chose to send it — trivially bypassed by omitting the header); the Slack bot's `_api_headers()` now computes the same HMAC the dashboard proxy does. |
+| `pending` | Mock backend for the dashboard: `lib/backend.ts` `backendFetch` routes every proxy call to an in-process mock (`lib/mock/backend.ts`) when `FLOWITHM_MOCK_BACKEND` is on. Supabase-backed, per-org, seeds a Loopline demo dataset, heuristic workflow extraction + keyword match, auto-provisions an org for signed-in users without one. Browser-side backend calls in `/brain/[id]` and `/workflow/[id]` moved behind Next proxies. |
 | `cab3602` | Test coverage pass (215→232): DELETE /keys happy+404; PATCH/DELETE /sources happy+404; GET /skills/{id}/conflicts; resolve accept-on-archived 400; review 404; GET /sources redaction; Notion/Gmail/Intercom config validation; fuzzy skill name match; endpoint-level multi-tenant isolation; `check_chunks_against_skills` no-skills + hit paths. | C-1 Slack confirmation via `threading.Timer` (don't starve the worker pool); H-2 threadpool bumped to 200 in lifespan; H-3 `count="planned"` (no full-scan); H-4 pagination on /sources, /skills/{id}/conflicts, /api/v1/keys; H-5 limits pushed into conflict SELECTs; M-7 singleton Anthropic in agent.py; M-8 `log_api_request` RPC (one DB call instead of two); M-9 HNSW migration guidance in schema; M-10 `run_staleness_pass` SQL RPC (no Python load of all skills). | M-9 `_hydrate_skill_meta` org-scoped; M-10 scheduler passes org_id to `update_source_last_synced`; M-11 FK on `api_requests.matched_skill_id`; M-12 drop `chunk_exists` precheck (upsert dedup is sufficient); M-13 `(org_id, is_active)` composite index on connected_sources; L-14 unique `previous_version_id WHERE archived=false`; L-15 org_id FKs → `ON DELETE CASCADE` (api_keys → `SET NULL`). | + mediums + lows: B-1 revised `accept_conflict` RPC now archives old skill FIRST then INSERTs new skill inside the transaction (avoids H-4 unique-active-name trap + orphan skills). M-2 embedder reuses `brain.store.get_client()` (30s timeout). M-3 staleness select uses `generated_at` (column that exists). M-4 `embed_and_store_batch` returns embeddings; scheduler passes them to `check_chunks_against_skills` (halves Voyage spend). M-5 Gmail HTTP timeout via `httplib2.Http(timeout=30)`. M-6 Slack /workflows/generate 2-attempt retry on 429/5xx. Lows: skip chunk on embed failure (no zero-vector pollution); `_DRIFT_POOL.shutdown()` in lifespan; `INGEST_REQUIRE_LOCK` env var. | H-NEW-1 brain routes use `getOrgIdFromSession()` (fail 401, not env fallback); H-NEW-2 HMAC-signed `X-Admin-Sig` header (org_id+timestamp, 5min TTL) prevents leaked ADMIN_TOKEN from targeting arbitrary tenants; M-NEW-1 signup route rejects users who already have an org (409); M-NEW-2 HMAC-sign extract_workflow + copy_json button values; M-3 CORS tightened to explicit methods/headers; M-4 bcrypt decoy hash on empty prefix; M-5 legacy setup route no longer sets dead cookie; M-6 usage skill lookup org-scoped; L-2 /health redacts error details for unauthenticated callers; L-3 dead flowithm_org_id cookie removed; L-4 sign.py TTL (24h) on HMAC blobs. | (185→215 tests): `test_scheduler.py` (5 — lock/partial-failure/cross-org/staleness), `test_untested_endpoints.py` (18 — /setup slug-collision, /sources config validation, /ingest/trigger admin gate, /conflicts resolve, /skills/{name} exact+fuzzy, /health error path), `test_malformed_claude.py` (7 — drift refusal/bad-JSON, query refusal/bad-JSON, multi-tenant isolation negative tests). | P-1 `embed_and_store_batch` (batch dedup + Voyage + upsert per source); P-2 drift `check_for_drift` uses `match_skills` RPC instead of re-embedding all skills; P-3 `check_chunks_against_skills` uses `match_skills` RPC + `ThreadPoolExecutor(8)` for concurrent Claude calls; P-4 rate-limiter bucket eviction at 10K keys; P-5 Slack bot `ThreadPoolExecutor(8)` replaces unbounded Thread spawns; P-6 `set local ivfflat.probes=10` in match_chunks/match_skills RPCs; P-9 pagination on /history, /conflicts; P-11 singleton Voyage/Supabase/Anthropic clients; P-14 pre-filter `is_active=True` in bcrypt key lookup; P-16 module-level Slack user-name cache. |
 
 ---

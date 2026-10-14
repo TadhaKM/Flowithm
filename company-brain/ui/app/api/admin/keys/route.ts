@@ -4,8 +4,7 @@
 import { NextResponse } from "next/server";
 
 import { MissingOrgSession, adminTokenMissing, getOrgIdFromSession, orgHeaders } from "@/lib/org";
-
-const API_URL = (process.env.FLOWITHM_API_URL || "http://localhost:8000").replace(/\/$/, "");
+import { backendFetch } from "@/lib/backend";
 
 function notConfigured() {
   return NextResponse.json(
@@ -29,7 +28,7 @@ export async function GET() {
   if (adminTokenMissing()) return notConfigured();
   try {
     const headers = await orgHeaders({ admin: true });
-    const res = await fetch(`${API_URL}/api/v1/keys`, { headers, cache: "no-store" });
+    const res = await backendFetch(`/api/v1/keys`, { headers, cache: "no-store" });
     const body = await res.text();
     return new NextResponse(body, {
       status: res.status,
@@ -61,7 +60,7 @@ export async function POST(request: Request) {
   payload.org_id = cookieOrg;
   try {
     const headers = await orgHeaders({ admin: true, json: true });
-    const res = await fetch(`${API_URL}/api/v1/keys`, {
+    const res = await backendFetch(`/api/v1/keys`, {
       method: "POST",
       headers,
       body: JSON.stringify(payload),

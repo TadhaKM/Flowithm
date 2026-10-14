@@ -8,13 +8,19 @@
 // not necessarily the dashboard's current tenant. Acceptable for the
 // self-hosted single-org default; a multi-tenant SaaS deployment would
 // need a per-org playground key (or skip the playground entirely).
+//
+// Mock mode needs no key: the in-process mock matches against the signed-in
+// user's own org, resolved from the session like every other proxy.
 import { NextResponse } from "next/server";
 
-const API_URL = (process.env.FLOWITHM_API_URL || "http://localhost:8000").replace(/\/$/, "");
+import { backendFetch, isMockBackend } from "@/lib/backend";
+import { getOrgIdFromSession, unauthorisedResponse } from "@/lib/org";
+
 const PLAYGROUND_KEY = process.env.FLOWITHM_PLAYGROUND_KEY || "";
 
 export async function GET(request: Request) {
-  if (!PLAYGROUND_KEY) {
+  const mock = isMockBackend();
+  if (!mock && !PLAYGROUND_KEY) {
     return NextResponse.json(
       {
         error:
@@ -35,15 +41,19 @@ export async function GET(request: Request) {
     );
   }
 
+  let headers: Record<string, string> = { Authorization: `Bearer ${PLAYGROUND_KEY}` };
+  if (mock) {
+    const orgId = await getOrgIdFromSession();
+    if (!orgId) return unauthorisedResponse();
+    headers = { "X-Org-ID": orgId };
+  }
+
   const started = performance.now();
   try {
-    const res = await fetch(
-      `${API_URL}/api/v1/skills/match?q=${encodeURIComponent(q)}`,
-      {
-        headers: { Authorization: `Bearer ${PLAYGROUND_KEY}` },
-        cache: "no-store",
-      },
-    );
+    const res = await backendFetch(`/api/v1/skills/match?q=${encodeURIComponent(q)}`, {
+      headers,
+      cache: "no-store",
+    });
     const body = await res.text();
     const elapsed = Math.round(performance.now() - started);
     return new NextResponse(body, {

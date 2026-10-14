@@ -13,6 +13,8 @@
 //   const res = await fetch(API + "/sources", { headers, ... });
 import crypto from "crypto";
 import { NextResponse } from "next/server";
+import { isMockBackend } from "./backend";
+import { createOrganisation, ensureSeeded } from "./mock/seed";
 import { createClient as createAuthClient } from "./supabase-server";
 import { getSupabase } from "./supabase";
 
@@ -37,19 +39,60 @@ export async function getOrgIdFromSession(): Promise<string> {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return "";
 
-  // Fast path: org_id cached in the user's app_metadata (set at signup).
-  if (user.app_metadata?.org_id) return user.app_metadata.org_id;
+  const mock = isMockBackend();
+  let orgId: string = user.app_metadata?.org_id || "";
 
-  // Slow path: first request after signup before JWT refreshes — fall
-  // back to a direct users-table lookup via the service-role client.
-  const svc = getSupabase();
-  const { data } = await svc
-    .from("users")
-    .select("org_id")
-    .eq("id", user.id)
-    .single();
+  if (!orgId) {
+    // Slow path: first request after signup before JWT refreshes — fall
+    // back to a direct users-table lookup via the service-role client.
+    const svc = getSupabase();
+    const { data } = await svc
+      .from("users")
+      .select("org_id")
+      .eq("id", user.id)
+      .maybeSingle();
+    orgId = data?.org_id || "";
+  }
 
-  return data?.org_id || "";
+  // Mock mode: a signed-in user whose signup never got as far as creating
+  // an organisation gets one now, so they land on a working dashboard.
+  if (!orgId && mock) {
+    orgId = await provisionMockOrg(user.id, user.email || "");
+  }
+
+  if (orgId && mock) await ensureSeeded(orgId);
+  return orgId;
+}
+
+
+const provisioning = new Map<string, Promise<string>>();
+
+function provisionMockOrg(userId: string, email: string): Promise<string> {
+  let p = provisioning.get(userId);
+  if (!p) {
+    p = (async () => {
+      const svc = getSupabase();
+      const local = email.split("@")[0] || "My";
+      const org = await createOrganisation(`${local}'s workspace`);
+      const { error } = await svc.from("users").insert({
+        id: userId,
+        org_id: org.id,
+        display_name: "",
+        email,
+      });
+      if (error) {
+        // Lost a race with another request (or the signup route): use the
+        // org that won and drop the one we just made.
+        await svc.from("organisations").delete().eq("id", org.id);
+        const { data } = await svc.from("users").select("org_id").eq("id", userId).maybeSingle();
+        return data?.org_id || "";
+      }
+      await svc.auth.admin.updateUserById(userId, { app_metadata: { org_id: org.id } });
+      return org.id;
+    })().finally(() => provisioning.delete(userId));
+    provisioning.set(userId, p);
+  }
+  return p;
 }
 
 
@@ -93,7 +136,8 @@ export async function orgHeaders(opts?: { admin?: boolean; json?: boolean }): Pr
 
 
 export function adminTokenMissing(): boolean {
-  return !ADMIN_TOKEN;
+  // The in-process mock backend doesn't check the admin token.
+  return !ADMIN_TOKEN && !isMockBackend();
 }
 
 

@@ -10,8 +10,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
 import { getSupabase } from "@/lib/supabase";
+import { backendFetch } from "@/lib/backend";
 
-const API_URL = (process.env.FLOWITHM_API_URL || "http://localhost:8000").replace(/\/$/, "");
 const BOOTSTRAP_TOKEN = process.env.BOOTSTRAP_TOKEN || "";
 
 export async function GET(request: NextRequest) {
@@ -74,7 +74,7 @@ export async function GET(request: NextRequest) {
     const setupHeaders: Record<string, string> = { "content-type": "application/json" };
     if (BOOTSTRAP_TOKEN) setupHeaders["Authorization"] = `Bearer ${BOOTSTRAP_TOKEN}`;
 
-    const setupRes = await fetch(`${API_URL}/setup`, {
+    const setupRes = await backendFetch(`/setup`, {
       method: "POST",
       headers: setupHeaders,
       body: JSON.stringify({ company_name: companyName }),

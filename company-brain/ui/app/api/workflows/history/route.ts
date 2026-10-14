@@ -1,12 +1,11 @@
 import { NextResponse } from "next/server";
 import { orgHeaders } from "@/lib/org";
-
-const API_URL = (process.env.FLOWITHM_API_URL || "http://localhost:8000").replace(/\/$/, "");
+import { backendFetch } from "@/lib/backend";
 
 export async function GET() {
   try {
     const headers = await orgHeaders({ admin: true });
-    const res = await fetch(`${API_URL}/history?limit=20`, { headers, cache: "no-store" });
+    const res = await backendFetch(`/history?limit=20`, { headers, cache: "no-store" });
     const text = await res.text();
     return new NextResponse(text, {
       status: res.status,
@@ -23,7 +22,7 @@ export async function GET() {
 export async function DELETE() {
   try {
     const headers = await orgHeaders({ admin: true });
-    const res = await fetch(`${API_URL}/history`, { method: "DELETE", headers, cache: "no-store" });
+    const res = await backendFetch(`/history`, { method: "DELETE", headers, cache: "no-store" });
     const text = await res.text();
     return new NextResponse(text, {
       status: res.status,

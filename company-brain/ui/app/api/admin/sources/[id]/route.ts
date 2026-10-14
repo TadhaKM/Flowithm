@@ -2,8 +2,7 @@
 import { NextResponse } from "next/server";
 
 import { MissingOrgSession, adminTokenMissing, orgHeaders, unauthorisedResponse } from "@/lib/org";
-
-const API_URL = (process.env.FLOWITHM_API_URL || "http://localhost:8000").replace(/\/$/, "");
+import { backendFetch } from "@/lib/backend";
 
 function adminGuard() {
   if (adminTokenMissing()) {
@@ -25,7 +24,7 @@ export async function PATCH(
   const payload = await request.json().catch(() => ({}));
   try {
     const headers = await orgHeaders({ admin: true, json: true });
-    const res = await fetch(`${API_URL}/sources/${encodeURIComponent(id)}`, {
+    const res = await backendFetch(`/sources/${encodeURIComponent(id)}`, {
       method: "PATCH",
       headers,
       body: JSON.stringify(payload),
@@ -54,7 +53,7 @@ export async function DELETE(
   const { id } = await params;
   try {
     const headers = await orgHeaders({ admin: true });
-    const res = await fetch(`${API_URL}/sources/${encodeURIComponent(id)}`, {
+    const res = await backendFetch(`/sources/${encodeURIComponent(id)}`, {
       method: "DELETE",
       headers,
       cache: "no-store",

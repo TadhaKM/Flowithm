@@ -4,15 +4,14 @@
 import { NextResponse } from "next/server";
 
 import { MissingOrgSession, adminTokenMissing, orgHeaders, unauthorisedResponse } from "@/lib/org";
-
-const API_URL = (process.env.FLOWITHM_API_URL || "http://localhost:8000").replace(/\/$/, "");
+import { backendFetch } from "@/lib/backend";
 
 export async function GET() {
   try {
     // GET /sources is now admin-gated server-side too — list still
     // returns redacted configs but only to authenticated admin callers.
     const headers = await orgHeaders({ admin: true });
-    const res = await fetch(`${API_URL}/sources`, { headers, cache: "no-store" });
+    const res = await backendFetch(`/sources`, { headers, cache: "no-store" });
     const body = await res.text();
     return new NextResponse(body, {
       status: res.status,
@@ -37,7 +36,7 @@ export async function POST(request: Request) {
   const payload = await request.json().catch(() => ({}));
   try {
     const headers = await orgHeaders({ admin: true, json: true });
-    const res = await fetch(`${API_URL}/sources`, {
+    const res = await backendFetch(`/sources`, {
       method: "POST",
       headers,
       body: JSON.stringify(payload),

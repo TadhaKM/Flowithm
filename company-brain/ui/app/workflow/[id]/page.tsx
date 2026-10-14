@@ -1,6 +1,6 @@
 "use client";
 
-// Workflow deeplink viewer: GET /workflows/{id}, render the same two-panel
+// Workflow deeplink viewer: GET /api/brain/{id}, render the same two-panel
 // layout as the home page output section. Self-contained on purpose —
 // the home page is heavily customized and we don't want a refactor in its
 // path. If you change the home-page workflow rendering and want it
@@ -9,8 +9,6 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 type WorkflowStep = {
   step: number;
@@ -50,7 +48,7 @@ export default function WorkflowDeeplink() {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    fetch(`${API_URL}/workflows/${id}`)
+    fetch(`/api/brain/${id}`)
       .then(async (res) => {
         if (!res.ok) {
           const body = await res.text();

@@ -7,8 +7,8 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase-server";
 import { getSupabase } from "@/lib/supabase";
+import { backendFetch } from "@/lib/backend";
 
-const API_URL = (process.env.FLOWITHM_API_URL || "http://localhost:8000").replace(/\/$/, "");
 const BOOTSTRAP_TOKEN = process.env.BOOTSTRAP_TOKEN || "";
 
 export async function POST(request: Request) {
@@ -50,7 +50,7 @@ export async function POST(request: Request) {
 
   let org: { id: string; name: string; slug: string };
   try {
-    const res = await fetch(`${API_URL}/setup`, {
+    const res = await backendFetch(`/setup`, {
       method: "POST",
       headers: setupHeaders,
       body: JSON.stringify({ company_name: companyName }),

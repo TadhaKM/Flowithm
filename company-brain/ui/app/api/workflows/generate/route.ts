@@ -1,13 +1,12 @@
 import { NextResponse } from "next/server";
 import { orgHeaders } from "@/lib/org";
-
-const API_URL = (process.env.FLOWITHM_API_URL || "http://localhost:8000").replace(/\/$/, "");
+import { backendFetch } from "@/lib/backend";
 
 export async function POST(request: Request) {
   try {
     const headers = await orgHeaders({ admin: true, json: true });
     const body = await request.text();
-    const res = await fetch(`${API_URL}/workflows/generate`, {
+    const res = await backendFetch(`/workflows/generate`, {
       method: "POST",
       headers,
       body,

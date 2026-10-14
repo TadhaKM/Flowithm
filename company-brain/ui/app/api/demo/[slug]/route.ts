@@ -5,8 +5,7 @@
 // Going through a Next.js route fixes both: same-origin from the
 // browser, server-side FLOWITHM_API_URL lookup.
 import { NextResponse } from "next/server";
-
-const API_URL = (process.env.FLOWITHM_API_URL || "http://localhost:8000").replace(/\/$/, "");
+import { backendFetch } from "@/lib/backend";
 
 export async function GET(
   _request: Request,
@@ -14,7 +13,7 @@ export async function GET(
 ) {
   const { slug } = await params;
   try {
-    const res = await fetch(`${API_URL}/demo/${encodeURIComponent(slug)}`, {
+    const res = await backendFetch(`/demo/${encodeURIComponent(slug)}`, {
       cache: "no-store",
     });
     const body = await res.text();

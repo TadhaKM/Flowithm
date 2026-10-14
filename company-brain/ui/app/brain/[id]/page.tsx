@@ -7,8 +7,6 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-
 type WorkflowStep = {
   step: number;
   action: string;
@@ -132,7 +130,8 @@ export default function BrainDetail() {
     }
     setReExtracting(true);
     try {
-      const res = await fetch(`${API_URL}/workflows/generate`, {
+      // Same-origin proxy: injects the admin token + org server-side.
+      const res = await fetch("/api/admin/workflows/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

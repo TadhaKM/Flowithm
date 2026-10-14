@@ -3,8 +3,7 @@
 import { NextResponse } from "next/server";
 
 import { MissingOrgSession, orgHeaders, unauthorisedResponse } from "@/lib/org";
-
-const API_URL = (process.env.FLOWITHM_API_URL || "http://localhost:8000").replace(/\/$/, "");
+import { backendFetch } from "@/lib/backend";
 
 export async function POST(
   _request: Request,
@@ -13,7 +12,7 @@ export async function POST(
   const { id } = await params;
   try {
     const headers = await orgHeaders({ admin: true });
-    const res = await fetch(`${API_URL}/skills/${encodeURIComponent(id)}/review`, {
+    const res = await backendFetch(`/skills/${encodeURIComponent(id)}/review`, {
       method: "POST",
       headers,
       cache: "no-store",

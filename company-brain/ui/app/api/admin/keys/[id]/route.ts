@@ -2,8 +2,7 @@
 import { NextResponse } from "next/server";
 
 import { MissingOrgSession, adminTokenMissing, orgHeaders, unauthorisedResponse } from "@/lib/org";
-
-const API_URL = (process.env.FLOWITHM_API_URL || "http://localhost:8000").replace(/\/$/, "");
+import { backendFetch } from "@/lib/backend";
 
 export async function DELETE(
   _request: Request,
@@ -22,7 +21,7 @@ export async function DELETE(
   const { id } = await params;
   try {
     const headers = await orgHeaders({ admin: true });
-    const res = await fetch(`${API_URL}/api/v1/keys/${encodeURIComponent(id)}`, {
+    const res = await backendFetch(`/api/v1/keys/${encodeURIComponent(id)}`, {
       method: "DELETE",
       headers,
       cache: "no-store",

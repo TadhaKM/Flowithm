@@ -2,13 +2,12 @@
 // for backward compatibility. The flowithm_org_id cookie is no longer set
 // (Supabase Auth sessions replaced it). Use /api/auth/signup instead.
 import { NextResponse } from "next/server";
-
-const API_URL = (process.env.FLOWITHM_API_URL || "http://localhost:8000").replace(/\/$/, "");
+import { backendFetch } from "@/lib/backend";
 
 export async function POST(request: Request) {
   const payload = await request.json().catch(() => ({}));
   try {
-    const res = await fetch(`${API_URL}/setup`, {
+    const res = await backendFetch(`/setup`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(payload),
