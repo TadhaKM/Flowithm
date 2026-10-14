@@ -5,9 +5,9 @@
 // Public paths (no session required):
 //   / (landing page), /login, /signup, /privacy, /api/*, /_next/*, /favicon.ico
 //
-// Everything else — including /brain/*, /setup, /onboarding/* — needs
-// a valid Supabase Auth session. The root page itself decides what to
-// render (landing page vs. generator app) based on the session.
+// Everything else — including /generate, /brain/*, /setup, /onboarding/* —
+// needs a valid Supabase Auth session. The root landing page reads the
+// session itself only to swap its calls to action.
 import { createServerClient } from "@supabase/ssr";
 import { NextRequest, NextResponse } from "next/server";
 

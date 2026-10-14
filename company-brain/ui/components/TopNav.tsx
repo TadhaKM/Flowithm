@@ -1,6 +1,6 @@
 "use client";
 
-// Shared top nav. All four routes (home, knowledge base, agent API, sources)
+// Shared top nav. All four app routes (generate, knowledge base, agent API, sources)
 // always render the full set of links so users can hop between them from any
 // page. The current route is rendered as a non-clickable span; everything
 // else is a Link.
@@ -13,6 +13,7 @@ type Item = { label: string; href: string };
 
 const ITEMS: Item[] = [
   { label: "Flowithm", href: "/" },
+  { label: "Generate", href: "/generate" },
   { label: "Knowledge base", href: "/brain" },
   { label: "Agent API", href: "/brain/api" },
   { label: "Sources", href: "/brain/sources" },

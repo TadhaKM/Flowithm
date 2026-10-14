@@ -1324,12 +1324,12 @@ function EmptyState() {
         Your knowledge base is empty
       </h3>
       <p className="mt-2 text-sm text-zinc-500 max-w-md mx-auto">
-        Generate your first workflow from the home page, or invite the Slack
+        Generate your first workflow from the Generate page, or invite the Slack
         bot to a channel.
       </p>
       <div className="mt-6 flex items-center justify-center gap-3">
         <Link
-          href="/"
+          href="/generate"
           className="inline-flex items-center gap-2 bg-[#1D9E75] hover:bg-[#22b384] text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors"
         >
           Generate a workflow →

@@ -1,9 +1,10 @@
-// Public marketing landing page, shown at "/" to signed-out visitors.
-// Signed-in users get the generator app instead (see app/page.tsx).
+// Public marketing landing page, shown at "/" to every visitor (see
+// app/page.tsx). Signed-in visitors get dashboard links in place of the
+// Sign in / Get started calls to action.
 // Server component — no interactivity beyond links, so no "use client".
 import Link from "next/link";
 
-export function LandingPage() {
+export function LandingPage({ signedIn = false }: { signedIn?: boolean }) {
   return (
     <main className="relative min-h-screen overflow-hidden">
       <BackgroundGlow />
@@ -33,16 +34,16 @@ export function LandingPage() {
           </div>
           <div className="flex items-center gap-3">
             <Link
-              href="/login"
+              href={signedIn ? "/generate" : "/login"}
               className="text-sm text-zinc-400 transition-colors hover:text-zinc-100"
             >
-              Sign in
+              {signedIn ? "Generate" : "Sign in"}
             </Link>
             <Link
-              href="/signup"
+              href={signedIn ? "/brain" : "/signup"}
               className="rounded-lg bg-[#1D9E75] px-4 py-2 text-sm font-medium text-white shadow-lg shadow-[#1D9E75]/20 transition-colors hover:bg-[#25b88a]"
             >
-              Get started
+              {signedIn ? "Open dashboard" : "Get started"}
             </Link>
           </div>
         </div>
@@ -74,17 +75,17 @@ export function LandingPage() {
 
           <div className="mt-9 flex flex-col items-center justify-center gap-3 sm:flex-row">
             <Link
-              href="/signup"
+              href={signedIn ? "/brain" : "/signup"}
               className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[#1D9E75] px-7 py-3.5 text-sm font-semibold text-white shadow-lg shadow-[#1D9E75]/25 transition-all hover:bg-[#25b88a] hover:shadow-[#1D9E75]/40 sm:w-auto"
             >
-              Get started free
+              {signedIn ? "Go to dashboard" : "Get started free"}
               <ArrowRight />
             </Link>
             <Link
-              href="/login"
+              href={signedIn ? "/generate" : "/login"}
               className="inline-flex w-full items-center justify-center rounded-xl border border-zinc-700 bg-zinc-900/60 px-7 py-3.5 text-sm font-medium text-zinc-200 transition-colors hover:border-zinc-600 hover:bg-zinc-800 sm:w-auto"
             >
-              Sign in
+              {signedIn ? "Generate a workflow" : "Sign in"}
             </Link>
           </div>
 
@@ -280,17 +281,17 @@ export function LandingPage() {
             </p>
             <div className="relative mt-9 flex flex-col items-center justify-center gap-3 sm:flex-row">
               <Link
-                href="/signup"
+                href={signedIn ? "/brain" : "/signup"}
                 className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[#1D9E75] px-7 py-3.5 text-sm font-semibold text-white shadow-lg shadow-[#1D9E75]/25 transition-all hover:bg-[#25b88a] sm:w-auto"
               >
-                Get started free
+                {signedIn ? "Go to dashboard" : "Get started free"}
                 <ArrowRight />
               </Link>
               <Link
-                href="/login"
+                href={signedIn ? "/generate" : "/login"}
                 className="inline-flex w-full items-center justify-center rounded-xl border border-zinc-700 bg-zinc-950/40 px-7 py-3.5 text-sm font-medium text-zinc-200 transition-colors hover:border-zinc-600 hover:bg-zinc-800 sm:w-auto"
               >
-                Sign in
+                {signedIn ? "Generate a workflow" : "Sign in"}
               </Link>
             </div>
           </div>

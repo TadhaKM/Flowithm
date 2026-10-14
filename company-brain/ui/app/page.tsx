@@ -1,7 +1,7 @@
-// Root route: public marketing landing page for signed-out visitors,
-// the workflow generator app for authenticated users.
+// Root route: the public marketing landing page, for every visitor.
+// Signed-in users see dashboard links in place of Sign in / Get started;
+// the workflow generator lives at /generate.
 import { createClient } from "@/lib/supabase-server";
-import { GeneratorApp } from "@/components/GeneratorApp";
 import { LandingPage } from "@/components/LandingPage";
 
 export const dynamic = "force-dynamic";
@@ -19,5 +19,5 @@ export default async function Home() {
     user = null;
   }
 
-  return user ? <GeneratorApp /> : <LandingPage />;
+  return <LandingPage signedIn={!!user} />;
 }
